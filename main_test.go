@@ -2,45 +2,176 @@ package main
 
 import (
 	"context"
+	"errors"
+	"io"
+	"log/slog"
+	"strings"
 	"testing"
 	"time"
 )
 
-func TestConfigValidationThroughParser(t *testing.T) {
-	c := Config{VendorID: "0781", ProductID: "5591", Serial: "abc-123", Grace: 30 * time.Second, ShutdownTimeout: 10 * time.Second, SanitizeTimeout: 2 * time.Second}
-	if !idRE.MatchString(c.VendorID) || !idRE.MatchString(c.ProductID) || !serialRE.MatchString(c.Serial) {
-		t.Fatal("expected valid identity")
+func testConfig() Config {
+	return Config{VendorID: "0204", ProductID: "6025", Serial: "047894467501", ShutdownTimeout: time.Second}
+}
+
+func TestNormalizeSerial(t *testing.T) {
+	if got := normalizeSerial("  abC-123 "); got != "ABC-123" {
+		t.Fatalf("got %q", got)
 	}
 }
 
-func TestMockPoweroffDoesNotRunSystemPoweroff(t *testing.T) {
-	if err := (MockPoweroff{}).Run(context.Background()); err != nil {
+func TestConfigValidation(t *testing.T) {
+	valid := testConfig()
+	valid.PrePoweroffDelay = 2 * time.Second
+	if err := validateConfig(valid); err != nil {
 		t.Fatal(err)
 	}
+	cases := []Config{
+		{VendorID: "204", ProductID: "6025", Serial: "abc", ShutdownTimeout: time.Second},
+		{VendorID: "0204", ProductID: "6025", Serial: "", ShutdownTimeout: time.Second},
+		{VendorID: "0204", ProductID: "6025", Serial: "abc", PrePoweroffDelay: -time.Second, ShutdownTimeout: time.Second},
+		{VendorID: "0204", ProductID: "6025", Serial: "abc", ShutdownTimeout: 0},
+	}
+	for i, c := range cases {
+		if err := validateConfig(c); err == nil {
+			t.Fatalf("case %d unexpectedly valid", i)
+		}
+	}
 }
 
-func TestIdentityMatching(t *testing.T) {
-	c := Config{VendorID: "0781", ProductID: "5591", Serial: "abc"}
-	if !matches(USB{VendorID: "0781", ProductID: "5591", Serial: "abc"}, c) {
-		t.Fatal("expected match")
+func TestIdentityMatchingRequiresVIDPIDAndSerial(t *testing.T) {
+	c := testConfig()
+	cases := []struct {
+		name string
+		usb  USB
+		want bool
+	}{
+		{"correct", USB{VendorID: "0204", ProductID: "6025", Serial: "047894467501"}, true},
+		{"normalized serial", USB{VendorID: "0204", ProductID: "6025", Serial: " 047894467501 "}, true},
+		{"wrong vendor", USB{VendorID: "9999", ProductID: "6025", Serial: "047894467501"}, false},
+		{"wrong product", USB{VendorID: "0204", ProductID: "9999", Serial: "047894467501"}, false},
+		{"wrong serial", USB{VendorID: "0204", ProductID: "6025", Serial: "other"}, false},
+		{"missing serial", USB{VendorID: "0204", ProductID: "6025"}, false},
 	}
-	if matches(USB{VendorID: "0781", ProductID: "5591", Serial: "other"}, c) {
-		t.Fatal("unexpected match")
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := matches(tc.usb, c); got != tc.want {
+				t.Fatalf("got %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
 
-func TestRemovalMatchesUSBAndBlockEvents(t *testing.T) {
-	c := Config{VendorID: "0204", ProductID: "6025", Serial: "047894467501"}
+func TestRemovalEventMatching(t *testing.T) {
+	c := testConfig()
 	base := map[string]string{"ACTION": "remove", "ID_BUS": "usb", "ID_VENDOR_ID": "0204", "ID_MODEL_ID": "6025", "ID_SERIAL_SHORT": "047894467501"}
-	if !removalMatches(base, c) {
-		t.Fatal("expected USB removal match")
+	cases := []struct {
+		name   string
+		mutate func(map[string]string)
+		want   bool
+	}{
+		{"correct", func(map[string]string) {}, true},
+		{"normalized serial", func(m map[string]string) { m["ID_SERIAL_SHORT"] = " 047894467501 " }, true},
+		{"wrong vendor", func(m map[string]string) { m["ID_VENDOR_ID"] = "9999" }, false},
+		{"wrong product", func(m map[string]string) { m["ID_MODEL_ID"] = "9999" }, false},
+		{"wrong serial", func(m map[string]string) { m["ID_SERIAL_SHORT"] = "other" }, false},
+		{"missing serial", func(m map[string]string) { delete(m, "ID_SERIAL_SHORT") }, false},
+		{"non USB", func(m map[string]string) { m["ID_BUS"] = "pci" }, false},
+		{"add", func(m map[string]string) { m["ACTION"] = "add" }, false},
+		{"change", func(m map[string]string) { m["ACTION"] = "change" }, false},
+		{"malformed", func(m map[string]string) { delete(m, "ID_MODEL_ID") }, false},
 	}
-	base["ID_SERIAL_SHORT"] = "0204_6025_047894467501"
-	if !removalMatches(base, c) {
-		t.Fatal("expected normalized serial match")
-	}
-	base["ID_BUS"] = "pci"
-	if removalMatches(base, c) {
-		t.Fatal("unexpected unrelated bus match")
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := make(map[string]string, len(base))
+			for k, v := range base {
+				m[k] = v
+			}
+			tc.mutate(m)
+			if got := removalMatches(m, c); got != tc.want {
+				t.Fatalf("got %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
+
+func TestCorrectRemovalRequestsShutdownOnce(t *testing.T) {
+	input := "ACTION=remove\nID_BUS=usb\nID_VENDOR_ID=0204\nID_MODEL_ID=6025\nID_SERIAL_SHORT=047894467501\n\n"
+	mock := &MockPoweroff{}
+	if err := monitorReader(context.Background(), testConfig(), slog.Default(), strings.NewReader(input), mock); err != nil {
+		t.Fatal(err)
+	}
+	if mock.Calls != 1 {
+		t.Fatalf("poweroff calls = %d", mock.Calls)
+	}
+}
+
+func TestNonMatchingEventsDoNotShutdown(t *testing.T) {
+	input := "ACTION=add\nID_BUS=usb\nID_VENDOR_ID=0204\nID_MODEL_ID=6025\nID_SERIAL_SHORT=047894467501\n\nACTION=remove\nID_BUS=usb\nID_VENDOR_ID=9999\nID_MODEL_ID=6025\nID_SERIAL_SHORT=047894467501\n\n"
+	mock := &MockPoweroff{}
+	if err := monitorReader(context.Background(), testConfig(), slog.Default(), strings.NewReader(input), mock); err != nil {
+		t.Fatal(err)
+	}
+	if mock.Calls != 0 {
+		t.Fatalf("poweroff calls = %d", mock.Calls)
+	}
+}
+
+func TestTestModeUsesMockPoweroff(t *testing.T) {
+	mock := &MockPoweroff{}
+	if err := runShutdown(context.Background(), testConfig(), slog.Default(), mock); err != nil {
+		t.Fatal(err)
+	}
+	if mock.Calls != 1 {
+		t.Fatal("mock poweroff was not called")
+	}
+}
+
+func TestShutdownDelayCancellation(t *testing.T) {
+	c := testConfig()
+	c.PrePoweroffDelay = time.Hour
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	mock := &MockPoweroff{}
+	if err := runShutdown(ctx, c, slog.Default(), mock); err != nil {
+		t.Fatal(err)
+	}
+	if mock.Calls != 0 {
+		t.Fatal("poweroff called after cancellation")
+	}
+}
+
+func TestShutdownFailureReturned(t *testing.T) {
+	mock := &MockPoweroff{Err: errors.New("poweroff failed")}
+	if err := runShutdown(context.Background(), testConfig(), slog.Default(), mock); err == nil {
+		t.Fatal("expected failure")
+	}
+}
+
+func TestShutdownTimeoutIsBounded(t *testing.T) {
+	c := testConfig()
+	c.ShutdownTimeout = 10 * time.Millisecond
+	mock := &blockingPoweroff{}
+	start := time.Now()
+	if err := runShutdown(context.Background(), c, slog.Default(), mock); err == nil {
+		t.Fatal("expected timeout error")
+	}
+	if time.Since(start) > time.Second {
+		t.Fatal("shutdown exceeded practical bound")
+	}
+}
+
+type blockingPoweroff struct{}
+
+func (*blockingPoweroff) Run(ctx context.Context) error { <-ctx.Done(); return ctx.Err() }
+
+func TestMonitorReaderPropagatesReaderError(t *testing.T) {
+	reader := &errorReader{}
+	if err := monitorReader(context.Background(), testConfig(), slog.Default(), reader, &MockPoweroff{}); err == nil {
+		t.Fatal("expected reader error")
+	}
+}
+
+type errorReader struct{}
+
+func (*errorReader) Read([]byte) (int, error) { return 0, io.ErrUnexpectedEOF }

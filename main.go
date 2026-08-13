@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -18,29 +19,41 @@ import (
 )
 
 const (
-	configPath = "/etc/killswitch/config.yaml"
-	armedPath  = "/run/killswitch/armed"
+	configPath = "/etc/usbkill/config.yaml"
+	armedPath  = "/run/usbkill/armed"
 )
 
 type Config struct {
-	VendorID        string
-	ProductID       string
-	Serial          string
-	Grace           time.Duration
-	ShutdownTimeout time.Duration
-	SanitizeTimeout time.Duration
+	VendorID         string
+	ProductID        string
+	Serial           string
+	PrePoweroffDelay time.Duration
+	ShutdownTimeout  time.Duration
 }
 
-type USB struct{ Node, Model, VendorID, ProductID, Serial, SysPath string }
+type USB struct {
+	Node, Model, VendorID, ProductID, Serial, SysPath string
+}
 
-type Poweroff interface{ Run(context.Context) error }
+type Poweroff interface {
+	Run(context.Context) error
+}
+
 type RealPoweroff struct{}
-type MockPoweroff struct{}
+
+type MockPoweroff struct {
+	Calls int
+	Err   error
+}
 
 func (RealPoweroff) Run(ctx context.Context) error {
 	return exec.CommandContext(ctx, "systemctl", "poweroff").Run()
 }
-func (MockPoweroff) Run(context.Context) error { return nil }
+
+func (m *MockPoweroff) Run(context.Context) error {
+	m.Calls++
+	return m.Err
+}
 
 var idRE = regexp.MustCompile(`^[0-9A-Fa-f]{4}$`)
 var serialRE = regexp.MustCompile(`^[A-Za-z0-9._:-]{1,128}$`)
@@ -81,11 +94,19 @@ func run(args []string) error {
 func usage() { fmt.Println("Usage: usbkill {list|setup|status|test|arm|disarm|daemon}") }
 
 func loadConfig() (Config, error) {
+	info, err := os.Stat(configPath)
+	if err != nil {
+		return Config{}, err
+	}
+	if info.Mode().Perm()&0022 != 0 {
+		return Config{}, errors.New("configuration is writable by group or other users")
+	}
 	b, err := os.ReadFile(configPath)
 	if err != nil {
 		return Config{}, err
 	}
 	var c Config
+	seen := make(map[string]bool)
 	for _, line := range strings.Split(string(b), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") || strings.HasSuffix(line, ":") {
@@ -93,22 +114,24 @@ func loadConfig() (Config, error) {
 		}
 		parts := strings.SplitN(line, ":", 2)
 		if len(parts) != 2 {
-			return Config{}, fmt.Errorf("invalid configuration line")
+			return Config{}, errors.New("invalid configuration line")
 		}
 		key, val := strings.TrimSpace(parts[0]), strings.Trim(strings.TrimSpace(parts[1]), `"'`)
+		if seen[key] {
+			return Config{}, fmt.Errorf("duplicate configuration field %q", key)
+		}
+		seen[key] = true
 		switch key {
 		case "vendor_id":
-			c.VendorID = val
+			c.VendorID = strings.ToUpper(val)
 		case "product_id":
-			c.ProductID = val
+			c.ProductID = strings.ToUpper(val)
 		case "serial":
-			c.Serial = val
-		case "grace_period":
-			c.Grace, err = time.ParseDuration(val)
+			c.Serial = normalizeSerial(val)
+		case "pre_poweroff_delay":
+			c.PrePoweroffDelay, err = time.ParseDuration(val)
 		case "shutdown_timeout":
 			c.ShutdownTimeout, err = time.ParseDuration(val)
-		case "sanitize_timeout":
-			c.SanitizeTimeout, err = time.ParseDuration(val)
 		default:
 			return Config{}, fmt.Errorf("unknown configuration field %q", key)
 		}
@@ -116,29 +139,36 @@ func loadConfig() (Config, error) {
 			return Config{}, fmt.Errorf("invalid %s", key)
 		}
 	}
-	if !idRE.MatchString(c.VendorID) || !idRE.MatchString(c.ProductID) {
-		return Config{}, errors.New("vendor_id and product_id must be four hexadecimal characters")
-	}
-	if !serialRE.MatchString(c.Serial) {
-		return Config{}, errors.New("serial is required and contains invalid characters")
-	}
-	if c.Grace < 0 || c.Grace > time.Hour {
-		return Config{}, errors.New("grace_period must be 0..1h")
-	}
-	if c.ShutdownTimeout <= 0 || c.ShutdownTimeout > 5*time.Minute {
-		return Config{}, errors.New("shutdown_timeout must be 1ns..5m")
-	}
-	if c.SanitizeTimeout <= 0 || c.SanitizeTimeout > time.Minute {
-		return Config{}, errors.New("sanitize_timeout must be 1ns..1m")
+	if err := validateConfig(c); err != nil {
+		return Config{}, err
 	}
 	return c, nil
+}
+
+func validateConfig(c Config) error {
+	if !idRE.MatchString(c.VendorID) || !idRE.MatchString(c.ProductID) {
+		return errors.New("vendor_id and product_id must be four hexadecimal characters")
+	}
+	if !serialRE.MatchString(c.Serial) {
+		return errors.New("serial is required and contains invalid characters")
+	}
+	if c.PrePoweroffDelay < 0 || c.PrePoweroffDelay > time.Minute {
+		return errors.New("pre_poweroff_delay must be 0..1m")
+	}
+	if c.ShutdownTimeout <= 0 || c.ShutdownTimeout > 5*time.Minute {
+		return errors.New("shutdown_timeout must be 1ns..5m")
+	}
+	return nil
 }
 
 func saveConfig(c Config) error {
 	if err := os.MkdirAll(filepath.Dir(configPath), 0750); err != nil {
 		return err
 	}
-	data := fmt.Sprintf("vendor_id: %q\nproduct_id: %q\nserial: %q\ngrace_period: %s\nshutdown_timeout: %s\nsanitize_timeout: %s\n", c.VendorID, c.ProductID, c.Serial, c.Grace, c.ShutdownTimeout, c.SanitizeTimeout)
+	if err := os.Chmod(filepath.Dir(configPath), 0750); err != nil {
+		return err
+	}
+	data := fmt.Sprintf("vendor_id: %q\nproduct_id: %q\nserial: %q\npre_poweroff_delay: %s\nshutdown_timeout: %s\n", c.VendorID, c.ProductID, normalizeSerial(c.Serial), c.PrePoweroffDelay, c.ShutdownTimeout)
 	tmp, err := os.CreateTemp(filepath.Dir(configPath), ".config-*")
 	if err != nil {
 		return err
@@ -155,6 +185,10 @@ func saveConfig(c Config) error {
 		return err
 	}
 	return os.Rename(name, configPath)
+}
+
+func normalizeSerial(s string) string {
+	return strings.ToUpper(strings.TrimSpace(s))
 }
 
 func listUSB() error {
@@ -191,10 +225,7 @@ func usbDevices() ([]USB, error) {
 		if err != nil || props["ID_BUS"] != "usb" || props["ID_TYPE"] == "partition" {
 			continue
 		}
-		x := USB{Node: "/dev/" + n, SysPath: base, VendorID: props["ID_VENDOR_ID"], ProductID: props["ID_MODEL_ID"], Serial: props["ID_SERIAL_SHORT"], Model: props["ID_MODEL"]}
-		if x.Serial == "" {
-			x.Serial = props["ID_SERIAL"]
-		}
+		x := USB{Node: "/dev/" + n, SysPath: base, VendorID: strings.ToUpper(props["ID_VENDOR_ID"]), ProductID: strings.ToUpper(props["ID_MODEL_ID"]), Serial: normalizeSerial(props["ID_SERIAL_SHORT"]), Model: props["ID_MODEL"]}
 		if x.Model == "" {
 			x.Model = props["ID_MODEL_FROM_DATABASE"]
 		}
@@ -223,17 +254,11 @@ func udevProperties(sysPath string) (map[string]string, error) {
 	}
 	return props, nil
 }
-func readSys(paths ...string) string {
-	for _, p := range paths {
-		if b, err := os.ReadFile(p); err == nil {
-			return strings.TrimSpace(string(b))
-		}
-	}
-	return ""
-}
+
 func matches(x USB, c Config) bool {
-	return strings.EqualFold(x.VendorID, c.VendorID) && strings.EqualFold(x.ProductID, c.ProductID) && x.Serial == c.Serial
+	return strings.EqualFold(x.VendorID, c.VendorID) && strings.EqualFold(x.ProductID, c.ProductID) && normalizeSerial(x.Serial) == normalizeSerial(c.Serial) && normalizeSerial(x.Serial) != ""
 }
+
 func find(c Config) ([]USB, error) {
 	xs, err := usbDevices()
 	if err != nil {
@@ -254,7 +279,7 @@ func setup() error {
 		return err
 	}
 	if len(xs) == 0 {
-		return errors.New("no USB storage devices found")
+		return errors.New("no unique-serial USB storage devices found")
 	}
 	if err := listUSB(); err != nil {
 		return err
@@ -265,22 +290,21 @@ func setup() error {
 		return errors.New("invalid selection")
 	}
 	x := xs[n-1]
-	if x.Serial == "" {
-		return errors.New("token has no unique serial; refusing setup")
-	}
-	fmt.Printf("Removing %s while armed will power off this machine. Continue? [y/N]: ", x.Model)
+	fmt.Printf("Selected %s VID:%s PID:%s Serial:%s\n", x.Model, x.VendorID, x.ProductID, x.Serial)
+	fmt.Print("Removing this token while armed will power off this machine. Continue? [y/N]: ")
 	var yes string
 	fmt.Scan(&yes)
 	if strings.ToLower(yes) != "y" {
 		return errors.New("cancelled")
 	}
-	c := Config{x.VendorID, x.ProductID, x.Serial, 30 * time.Second, 10 * time.Second, 2 * time.Second}
+	c := Config{x.VendorID, x.ProductID, normalizeSerial(x.Serial), 0, 10 * time.Second}
 	if err := saveConfig(c); err != nil {
 		return err
 	}
-	fmt.Println("Saved configuration. Run: sudo usbkill test, then sudo usbkill arm")
+	fmt.Println("Saved configuration. Run: sudo usbkill test, then sudo usbkill arm.")
 	return nil
 }
+
 func arm() error {
 	c, err := loadConfig()
 	if err != nil {
@@ -296,8 +320,13 @@ func arm() error {
 	if err := os.MkdirAll(filepath.Dir(armedPath), 0750); err != nil {
 		return err
 	}
-	return os.WriteFile(armedPath, []byte("armed\n"), 0600)
+	if err := os.WriteFile(armedPath, []byte("armed\n"), 0600); err != nil {
+		return err
+	}
+	fmt.Println("Armed. Run sudo usbkill test to verify removal safely.")
+	return nil
 }
+
 func disarm() error {
 	if err := os.Remove(armedPath); err != nil && !os.IsNotExist(err) {
 		return err
@@ -305,6 +334,7 @@ func disarm() error {
 	fmt.Println("Disarmed.")
 	return nil
 }
+
 func status() error {
 	c, err := loadConfig()
 	if err != nil {
@@ -315,7 +345,7 @@ func status() error {
 		return err
 	}
 	_, armedErr := os.Stat(armedPath)
-	fmt.Printf("Config: valid\nToken: %s\nWatchdog: %s\n", c.Serial, present(len(m)))
+	fmt.Printf("Config: valid\nToken: %s\nWatchdog: %s\nPre-poweroff delay: %s\n", c.Serial, present(len(m)), c.PrePoweroffDelay)
 	if armedErr == nil {
 		fmt.Println("Armed: yes")
 	} else {
@@ -323,6 +353,7 @@ func status() error {
 	}
 	return nil
 }
+
 func present(n int) string {
 	if n == 1 {
 		return "PRESENT"
@@ -335,8 +366,10 @@ func daemon(test bool) error {
 	if err != nil {
 		return err
 	}
-	if _, err = os.Stat(armedPath); err != nil {
-		return errors.New("not armed; run sudo usbkill arm")
+	if !test {
+		if _, err = os.Stat(armedPath); err != nil {
+			return errors.New("not armed; run sudo usbkill arm")
+		}
 	}
 	m, err := find(c)
 	if err != nil {
@@ -348,14 +381,12 @@ func daemon(test bool) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
-	logger.Info("usbkill started", "test_mode", test)
-	return monitor(ctx, c, logger, func(ctx context.Context) error {
-		if test {
-			logger.Warn("TEST MODE: poweroff suppressed")
-			return nil
-		}
-		return RealPoweroff{}.Run(ctx)
-	})
+	logger.Info("usb token detected", "test_mode", test)
+	var poweroff Poweroff = RealPoweroff{}
+	if test {
+		poweroff = &MockPoweroff{}
+	}
+	return monitor(ctx, c, logger, poweroff)
 }
 
 func removalMatches(props map[string]string, c Config) bool {
@@ -365,14 +396,11 @@ func removalMatches(props map[string]string, c Config) bool {
 	if !strings.EqualFold(props["ID_VENDOR_ID"], c.VendorID) || !strings.EqualFold(props["ID_MODEL_ID"], c.ProductID) {
 		return false
 	}
-	serial := props["ID_SERIAL_SHORT"]
-	if serial == "" {
-		serial = props["ID_SERIAL"]
-	}
-	return serial == c.Serial || strings.HasPrefix(serial, c.VendorID+"_"+c.ProductID+"_") && strings.HasSuffix(serial, "_"+c.Serial)
+	serial := normalizeSerial(props["ID_SERIAL_SHORT"])
+	return serial != "" && serial == normalizeSerial(c.Serial)
 }
 
-func monitor(ctx context.Context, c Config, logger *slog.Logger, poweroff func(context.Context) error) error {
+func monitor(ctx context.Context, c Config, logger *slog.Logger, poweroff Poweroff) error {
 	cmd := exec.CommandContext(ctx, "udevadm", "monitor", "--udev", "--property")
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -381,28 +409,25 @@ func monitor(ctx context.Context, c Config, logger *slog.Logger, poweroff func(c
 	if err = cmd.Start(); err != nil {
 		return err
 	}
-	defer cmd.Wait()
-	scanner := bufio.NewScanner(stdout)
-	props := map[string]string{}
+	defer func() {
+		if waitErr := cmd.Wait(); waitErr != nil && ctx.Err() == nil {
+			logger.Error("udev monitor exited", "error", waitErr)
+		}
+	}()
+	return monitorReader(ctx, c, logger, stdout, poweroff)
+}
+
+func monitorReader(ctx context.Context, c Config, logger *slog.Logger, reader io.Reader, poweroff Poweroff) error {
+	scanner := bufio.NewScanner(reader)
+	props := make(map[string]string)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" {
 			if removalMatches(props, c) {
-				logger.Warn("token removed; starting bounded shutdown")
-				timer := time.NewTimer(c.SanitizeTimeout)
-				select {
-				case <-timer.C:
-					logger.Warn("best-effort memory sanitization window ended")
-				case <-ctx.Done():
-					timer.Stop()
-					return nil
-				}
-				pctx, cancel := context.WithTimeout(context.Background(), c.ShutdownTimeout)
-				_ = poweroff(pctx)
-				cancel()
-				return nil
+				logger.Warn("USB token removed; shutdown scheduled")
+				return runShutdown(ctx, c, logger, poweroff)
 			}
-			props = map[string]string{}
+			props = make(map[string]string)
 			continue
 		}
 		if k, v, ok := strings.Cut(line, "="); ok {
@@ -410,4 +435,25 @@ func monitor(ctx context.Context, c Config, logger *slog.Logger, poweroff func(c
 		}
 	}
 	return scanner.Err()
+}
+
+func runShutdown(ctx context.Context, c Config, logger *slog.Logger, poweroff Poweroff) error {
+	if c.PrePoweroffDelay > 0 {
+		timer := time.NewTimer(c.PrePoweroffDelay)
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			timer.Stop()
+			logger.Warn("shutdown cancelled by service termination")
+			return nil
+		}
+	}
+	pctx, cancel := context.WithTimeout(ctx, c.ShutdownTimeout)
+	defer cancel()
+	if err := poweroff.Run(pctx); err != nil {
+		logger.Error("shutdown command failed", "error", err)
+		return err
+	}
+	logger.Info("shutdown command executed")
+	return nil
 }

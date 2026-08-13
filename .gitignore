@@ -1,4 +1,6 @@
 usbkill
+pkg/
+src/
 *.pkg.tar.*
 *.log
 .DS_Store

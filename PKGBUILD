@@ -1,5 +1,5 @@
 pkgname=usbkill
-pkgver=0.1.1
+pkgver=0.2.0
 pkgrel=1
 pkgdesc='Simple Arch Linux USB-presence shutdown watchdog'
 arch=('x86_64')
