@@ -1,0 +1,4 @@
+usbkill
+*.pkg.tar.*
+*.log
+.DS_Store

@@ -1,0 +1,21 @@
+[Unit]
+Description=USB physical-presence shutdown watchdog
+After=systemd-udev-settle.service
+Wants=systemd-udev-settle.service
+Conflicts=shutdown.target reboot.target halt.target
+Before=shutdown.target reboot.target halt.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/usbkill daemon
+Restart=on-failure
+RestartSec=2s
+KillSignal=SIGTERM
+NoNewPrivileges=no
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=full
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+
+[Install]
+WantedBy=multi-user.target
