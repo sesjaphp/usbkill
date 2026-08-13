@@ -28,3 +28,19 @@ func TestIdentityMatching(t *testing.T) {
 		t.Fatal("unexpected match")
 	}
 }
+
+func TestRemovalMatchesUSBAndBlockEvents(t *testing.T) {
+	c := Config{VendorID: "0204", ProductID: "6025", Serial: "047894467501"}
+	base := map[string]string{"ACTION": "remove", "ID_BUS": "usb", "ID_VENDOR_ID": "0204", "ID_MODEL_ID": "6025", "ID_SERIAL_SHORT": "047894467501"}
+	if !removalMatches(base, c) {
+		t.Fatal("expected USB removal match")
+	}
+	base["ID_SERIAL_SHORT"] = "0204_6025_047894467501"
+	if !removalMatches(base, c) {
+		t.Fatal("expected normalized serial match")
+	}
+	base["ID_BUS"] = "pci"
+	if removalMatches(base, c) {
+		t.Fatal("unexpected unrelated bus match")
+	}
+}

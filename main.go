@@ -358,8 +358,22 @@ func daemon(test bool) error {
 	})
 }
 
+func removalMatches(props map[string]string, c Config) bool {
+	if props["ACTION"] != "remove" || props["ID_BUS"] != "usb" {
+		return false
+	}
+	if !strings.EqualFold(props["ID_VENDOR_ID"], c.VendorID) || !strings.EqualFold(props["ID_MODEL_ID"], c.ProductID) {
+		return false
+	}
+	serial := props["ID_SERIAL_SHORT"]
+	if serial == "" {
+		serial = props["ID_SERIAL"]
+	}
+	return serial == c.Serial || strings.HasPrefix(serial, c.VendorID+"_"+c.ProductID+"_") && strings.HasSuffix(serial, "_"+c.Serial)
+}
+
 func monitor(ctx context.Context, c Config, logger *slog.Logger, poweroff func(context.Context) error) error {
-	cmd := exec.CommandContext(ctx, "udevadm", "monitor", "--udev", "--property", "--subsystem-match=usb")
+	cmd := exec.CommandContext(ctx, "udevadm", "monitor", "--udev", "--property")
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return err
@@ -373,7 +387,7 @@ func monitor(ctx context.Context, c Config, logger *slog.Logger, poweroff func(c
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" {
-			if props["ACTION"] == "remove" && props["ID_VENDOR_ID"] == c.VendorID && props["ID_MODEL_ID"] == c.ProductID && (props["ID_SERIAL_SHORT"] == c.Serial || props["ID_SERIAL"] == c.Serial) {
+			if removalMatches(props, c) {
 				logger.Warn("token removed; starting bounded shutdown")
 				timer := time.NewTimer(c.SanitizeTimeout)
 				select {
