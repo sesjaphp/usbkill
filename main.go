@@ -180,26 +180,48 @@ func usbDevices() ([]USB, error) {
 	var out []USB
 	for _, e := range entries {
 		n := e.Name()
+		base := filepath.Join("/sys/class/block", n)
+		if _, err := os.Stat(filepath.Join(base, "partition")); err == nil {
+			continue
+		}
 		if strings.HasPrefix(n, "loop") || strings.HasPrefix(n, "ram") || strings.HasPrefix(n, "dm-") {
 			continue
 		}
-		base := filepath.Join("/sys/class/block", n)
-		real, err := filepath.EvalSymlinks(base)
-		if err != nil || !strings.Contains(real, "/usb") {
+		props, err := udevProperties(base)
+		if err != nil || props["ID_BUS"] != "usb" || props["ID_TYPE"] == "partition" {
 			continue
 		}
-		x := USB{Node: "/dev/" + n, SysPath: base}
-		x.VendorID = readSys(filepath.Join(real, "../../idVendor"), filepath.Join(real, "device/idVendor"))
-		x.ProductID = readSys(filepath.Join(real, "../../idProduct"), filepath.Join(real, "device/idProduct"))
-		x.Serial = readSys(filepath.Join(real, "../../serial"), filepath.Join(real, "device/serial"))
-		x.Model = readSys(filepath.Join(real, "../../product"), filepath.Join(real, "device/product"))
+		x := USB{Node: "/dev/" + n, SysPath: base, VendorID: props["ID_VENDOR_ID"], ProductID: props["ID_MODEL_ID"], Serial: props["ID_SERIAL_SHORT"], Model: props["ID_MODEL"]}
+		if x.Serial == "" {
+			x.Serial = props["ID_SERIAL"]
+		}
+		if x.Model == "" {
+			x.Model = props["ID_MODEL_FROM_DATABASE"]
+		}
 		if x.Model == "" {
 			x.Model = n
 		}
-		out = append(out, x)
+		if idRE.MatchString(x.VendorID) && idRE.MatchString(x.ProductID) {
+			out = append(out, x)
+		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Node < out[j].Node })
 	return out, nil
+}
+
+func udevProperties(sysPath string) (map[string]string, error) {
+	cmd := exec.Command("udevadm", "info", "--query=property", "--path", sysPath)
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, err
+	}
+	props := make(map[string]string)
+	for _, line := range strings.Split(string(out), "\n") {
+		if key, value, ok := strings.Cut(line, "="); ok {
+			props[key] = value
+		}
+	}
+	return props, nil
 }
 func readSys(paths ...string) string {
 	for _, p := range paths {
