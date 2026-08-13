@@ -1,13 +1,11 @@
 pkgbase = usbkill
 	pkgdesc = Simple Arch Linux USB-presence shutdown watchdog
-	pkgver = 0.1.0
+	pkgver = 0.1.1
 	pkgrel = 1
 	url = https://github.com/sesjaphp/usbkill
 	arch = x86_64
 	license = MIT
 	makedepends = go
 	depends = systemd
-	source = usbkill::git+https://github.com/sesjaphp/usbkill.git#branch=main
-	sha256sums = SKIP
 
 pkgname = usbkill

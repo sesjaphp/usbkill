@@ -20,6 +20,8 @@ cd usbkill
 makepkg -si
 ```
 
+The `PKGBUILD` is deliberately local-source only. After the checkout is present, `makepkg` does not clone GitHub, fetch a remote source, or require a GitHub login. You may also copy the complete project directory to an offline Arch machine and run `makepkg -si` there.
+
 The package installs `/usr/bin/usbkill`, `/usr/lib/systemd/system/usbkill.service`, and `/etc/usbkill`. Installation never configures, enables, or arms the watchdog automatically.
 
 ## Configure and test
@@ -99,3 +101,5 @@ Arch package checks, when run on Arch Linux, are:
 makepkg --printsrcinfo > .SRCINFO
 makepkg -f
 ```
+
+The package build reads the Go source, service unit, README, and license from the same local directory as `PKGBUILD`.

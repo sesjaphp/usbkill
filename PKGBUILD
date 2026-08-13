@@ -1,5 +1,5 @@
 pkgname=usbkill
-pkgver=0.1.0
+pkgver=0.1.1
 pkgrel=1
 pkgdesc='Simple Arch Linux USB-presence shutdown watchdog'
 arch=('x86_64')
@@ -7,23 +7,23 @@ url='https://github.com/sesjaphp/usbkill'
 license=('MIT')
 depends=('systemd')
 makedepends=('go')
-source=('usbkill::git+https://github.com/sesjaphp/usbkill.git#branch=main')
-sha256sums=('SKIP')
+source=()
 
 build() {
-  cd "$srcdir/usbkill"
+  cd "$startdir"
   go build -trimpath -ldflags="-s -w" -o usbkill .
 }
 
 check() {
-  cd "$srcdir/usbkill"
+  cd "$startdir"
   go test ./...
 }
 
 package() {
-  cd "$srcdir/usbkill"
+  cd "$startdir"
   install -Dm0755 usbkill "$pkgdir/usr/bin/usbkill"
   install -Dm0644 usbkill.service "$pkgdir/usr/lib/systemd/system/usbkill.service"
   install -Dm0644 README.md "$pkgdir/usr/share/doc/usbkill/README.md"
+  install -Dm0644 LICENSE "$pkgdir/usr/share/licenses/usbkill/LICENSE"
   install -dm0750 "$pkgdir/etc/usbkill"
 }
