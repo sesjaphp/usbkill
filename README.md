@@ -92,7 +92,7 @@ This is defense in depth, not a complete physical-security system. An attacker m
 make fmt
 make vet
 make test
-go build ./...
+go build .
 ```
 
 Arch package checks, when run on Arch Linux, are:

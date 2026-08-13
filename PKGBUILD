@@ -16,7 +16,7 @@ build() {
 
 check() {
   cd "$startdir"
-  go test ./...
+  go test .
 }
 
 package() {

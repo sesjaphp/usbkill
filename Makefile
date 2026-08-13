@@ -6,13 +6,13 @@ build:
 	go build -trimpath -o usbkill .
 
 test:
-	go test ./...
+	go test .
 
 fmt:
 	gofmt -w main.go
 
 vet:
-	go vet ./...
+	go vet .
 
 install: build
 	install -Dm0755 usbkill /usr/bin/usbkill
