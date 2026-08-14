@@ -103,7 +103,7 @@ The file is written atomically with mode `0600`; group- or world-writable config
 
 `usbkill` does not guarantee destruction of DRAM, CPU caches, GPU memory, firmware memory, DMA buffers, or swap. It does not protect against a root attacker, compromised kernel, modified filesystem, firmware or UEFI compromise, cold-boot attack, storage tampering, power removal, or an attacker who prevents the service from starting. LUKS does not protect plaintext that remains available in RAM while the system is running. Early-boot or initramfs protection is a separate project and is not implemented here.
 
-A privileged attacker can disable the service, alter the binary or configuration, or boot another operating system. Normal poweroff is used instead of an abrupt hard power cut because filesystem integrity matters.
+A privileged attacker can disable the service, alter the binary or configuration, or boot another operating system. Normal systemd poweroff is used instead of an abrupt hard power cut because filesystem integrity matters. The kill-switch invocation uses `--ignore-inhibitors` deliberately: active desktop or application poweroff inhibitors must not leave the machine running after the configured token is removed. This can interrupt applications that requested the inhibitor, which is expected emergency behavior.
 
 ## Recovery
 
