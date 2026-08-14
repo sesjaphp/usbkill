@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -430,7 +431,7 @@ func daemon(test bool) error {
 		return err
 	}
 	logger.Info("usb token detected", "test_mode", test)
-	return monitor(ctx, c, logger, poweroff)
+	return monitor(ctx, c, logger, poweroff, func() { notifyReady(logger) })
 }
 
 func verifyStartupToken(ctx context.Context, c Config, test bool, logger *slog.Logger, poweroff Poweroff, finder deviceFinder) error {
@@ -463,7 +464,26 @@ func removalMatches(props map[string]string, c Config) bool {
 	return serial != "" && serial == normalizeSerial(c.Serial)
 }
 
-func monitor(ctx context.Context, c Config, logger *slog.Logger, poweroff Poweroff) error {
+func notifyReady(logger *slog.Logger) {
+	socket := os.Getenv("NOTIFY_SOCKET")
+	if socket == "" {
+		return
+	}
+	if strings.HasPrefix(socket, "@") {
+		socket = "\x00" + socket[1:]
+	}
+	conn, err := net.DialUnix("unixgram", nil, &net.UnixAddr{Name: socket, Net: "unixgram"})
+	if err != nil {
+		logger.Error("systemd readiness notification failed", "error", err)
+		return
+	}
+	defer conn.Close()
+	if _, err := conn.Write([]byte("READY=1\nSTATUS=USB token monitor active")); err != nil {
+		logger.Error("systemd readiness notification failed", "error", err)
+	}
+}
+
+func monitor(ctx context.Context, c Config, logger *slog.Logger, poweroff Poweroff, ready func()) error {
 	cmd := exec.CommandContext(ctx, "udevadm", "monitor", "--udev", "--property")
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -472,6 +492,7 @@ func monitor(ctx context.Context, c Config, logger *slog.Logger, poweroff Powero
 	if err = cmd.Start(); err != nil {
 		return fmt.Errorf("start udev monitor: %w", err)
 	}
+	ready()
 	monitorErr := monitorReader(ctx, c, logger, stdout, poweroff)
 	if ctx.Err() == nil && cmd.Process != nil {
 		_ = cmd.Process.Kill()
