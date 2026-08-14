@@ -20,13 +20,15 @@ import (
 )
 
 const (
-	configPath          = "/etc/usbkill/config.yaml"
 	armedPath           = "/run/usbkill/armed"
 	maxPoweroffAttempts = 3
 	poweroffRetryDelay  = time.Second
 )
 
-var lockPath = "/run/usbkill/monitor.lock"
+var (
+	configPath = "/etc/usbkill/config.yaml"
+	lockPath   = "/run/usbkill/monitor.lock"
+)
 
 type Config struct {
 	VendorID         string
@@ -176,6 +178,9 @@ func validateConfig(c Config) error {
 }
 
 func saveConfig(c Config) error {
+	if err := validateConfig(c); err != nil {
+		return err
+	}
 	if err := os.MkdirAll(filepath.Dir(configPath), 0750); err != nil {
 		return err
 	}
@@ -205,6 +210,12 @@ func normalizeSerial(s string) string {
 	return strings.ToUpper(strings.TrimSpace(s))
 }
 
+func printUSBDevices(xs []USB) {
+	for i, x := range xs {
+		fmt.Printf("[%d] %s\n    Device: %s\n    VID: %s PID: %s Serial: %s\n", i+1, x.Model, x.Node, x.VendorID, x.ProductID, x.Serial)
+	}
+}
+
 func listUSB() error {
 	xs, err := usbDevices()
 	if err != nil {
@@ -214,9 +225,7 @@ func listUSB() error {
 		fmt.Println("No USB storage devices found.")
 		return nil
 	}
-	for i, x := range xs {
-		fmt.Printf("[%d] %s\n    Device: %s\n    VID: %s PID: %s Serial: %s\n", i+1, x.Model, x.Node, x.VendorID, x.ProductID, x.Serial)
-	}
+	printUSBDevices(xs)
 	return nil
 }
 
@@ -246,7 +255,7 @@ func usbDevices() ([]USB, error) {
 		if x.Model == "" {
 			x.Model = n
 		}
-		if idRE.MatchString(x.VendorID) && idRE.MatchString(x.ProductID) {
+		if validUSBToken(x) {
 			out = append(out, x)
 		}
 	}
@@ -267,6 +276,10 @@ func udevProperties(sysPath string) (map[string]string, error) {
 		}
 	}
 	return props, nil
+}
+
+func validUSBToken(x USB) bool {
+	return idRE.MatchString(x.VendorID) && idRE.MatchString(x.ProductID) && serialRE.MatchString(normalizeSerial(x.Serial))
 }
 
 func matches(x USB, c Config) bool {
@@ -295,9 +308,7 @@ func setup() error {
 	if len(xs) == 0 {
 		return errors.New("no unique-serial USB storage devices found")
 	}
-	if err := listUSB(); err != nil {
-		return err
-	}
+	printUSBDevices(xs)
 	var n int
 	fmt.Printf("Select token [1-%d]: ", len(xs))
 	if _, err := fmt.Scan(&n); err != nil || n < 1 || n > len(xs) {
@@ -385,7 +396,7 @@ func status() error {
 		return err
 	}
 	_, armedErr := os.Stat(armedPath)
-	fmt.Printf("Config: valid\nToken: %s\nWatchdog: %s\nPre-poweroff delay: %s\n", c.Serial, present(len(m)), c.PrePoweroffDelay)
+	fmt.Printf("Config: valid\nToken: %s\nWatchdog: %s\nPre-poweroff delay: %s\n", c.Serial, presence(len(m)), c.PrePoweroffDelay)
 	if armedErr == nil {
 		fmt.Println("Armed: yes")
 	} else {
@@ -394,11 +405,15 @@ func status() error {
 	return nil
 }
 
-func present(n int) string {
-	if n == 1 {
+func presence(n int) string {
+	switch n {
+	case 0:
+		return "ABSENT"
+	case 1:
 		return "PRESENT"
+	default:
+		return fmt.Sprintf("AMBIGUOUS (%d matches)", n)
 	}
-	return "ABSENT"
 }
 
 type deviceFinder func(Config) ([]USB, error)

@@ -13,11 +13,11 @@ cd usbkill
 makepkg -si
 ```
 
-The `PKGBUILD` is local-source only. After cloning the repository, `makepkg` does not fetch another GitHub source or require a second GitHub login. It installs `/usr/bin/usbkill`, `/usr/lib/systemd/system/usbkill.service`, documentation, and an initially empty `/etc/usbkill` directory. Installation does not configure, enable, or arm the watchdog.
+The `PKGBUILD` is local-source only. After cloning the repository, `makepkg` does not fetch another GitHub source or require a second GitHub login. It installs `/usr/bin/usbkill`, both `usbkill.service` and `usbkill-failure.service`, documentation, and an initially empty `/etc/usbkill` directory. The package declares `util-linux` because the failure notification uses its `logger` command. Installation does not configure, enable, or arm the watchdog.
 
 ## Configure and test
 
-List unique-serial USB storage devices:
+List USB storage devices with valid VID, PID, and non-empty stable serial identities:
 
 ```sh
 sudo usbkill list
@@ -51,7 +51,9 @@ journalctl -u usbkill.service -f
 journalctl -u usbkill-failure.service -b --no-pager
 ```
 
-`disarm` stops and disables the production service before removing the armed marker:
+`status` reports `PRESENT`, `ABSENT`, or `AMBIGUOUS (n matches)` for the configured identity. An ambiguous state must be investigated before arming.
+
+`disarm` stops and disables the production service before removing the marker:
 
 ```sh
 sudo usbkill disarm

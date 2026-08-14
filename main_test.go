@@ -72,6 +72,95 @@ func TestIdentityMatchingRequiresVIDPIDAndSerial(t *testing.T) {
 	}
 }
 
+func TestValidUSBTokenRequiresStableSerial(t *testing.T) {
+	cases := []struct {
+		name string
+		usb  USB
+		want bool
+	}{
+		{"valid", USB{VendorID: "0204", ProductID: "6025", Serial: "047894467501"}, true},
+		{"normalized serial", USB{VendorID: "0204", ProductID: "6025", Serial: " 047894467501 "}, true},
+		{"missing serial", USB{VendorID: "0204", ProductID: "6025"}, false},
+		{"invalid serial", USB{VendorID: "0204", ProductID: "6025", Serial: "contains space"}, false},
+		{"invalid vendor", USB{VendorID: "204", ProductID: "6025", Serial: "047894467501"}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := validUSBToken(tc.usb); got != tc.want {
+				t.Fatalf("got %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestSaveConfigValidatesBeforePersistence(t *testing.T) {
+	oldPath := configPath
+	configPath = filepath.Join(t.TempDir(), "usbkill", "config.yaml")
+	defer func() { configPath = oldPath }()
+	invalid := testConfig()
+	invalid.Serial = ""
+	if err := saveConfig(invalid); err == nil {
+		t.Fatal("expected invalid configuration rejection")
+	}
+	if _, err := os.Stat(configPath); !os.IsNotExist(err) {
+		t.Fatalf("config file exists or returned unexpected error: %v", err)
+	}
+}
+
+func TestSaveConfigRoundTrip(t *testing.T) {
+	oldPath := configPath
+	configPath = filepath.Join(t.TempDir(), "usbkill", "config.yaml")
+	defer func() { configPath = oldPath }()
+	want := testConfig()
+	want.PrePoweroffDelay = 2 * time.Second
+	if err := saveConfig(want); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0600 {
+		t.Fatalf("mode = %o, want 0600", info.Mode().Perm())
+	}
+	got, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != want {
+		t.Fatalf("config = %#v, want %#v", got, want)
+	}
+}
+
+func TestPresenceStates(t *testing.T) {
+	if got := presence(0); got != "ABSENT" {
+		t.Fatalf("zero matches = %q", got)
+	}
+	if got := presence(1); got != "PRESENT" {
+		t.Fatalf("one match = %q", got)
+	}
+	if got := presence(2); got != "AMBIGUOUS (2 matches)" {
+		t.Fatalf("two matches = %q", got)
+	}
+}
+
+func TestPackageDeclaresFailureAlertDependencyAndValidation(t *testing.T) {
+	packageData, err := os.ReadFile("PKGBUILD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(packageData), "'util-linux'") {
+		t.Fatal("PKGBUILD does not declare util-linux")
+	}
+	makeData, err := os.ReadFile("Makefile")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(makeData), "systemd-analyze verify usbkill.service usbkill-failure.service") {
+		t.Fatal("Makefile does not validate both systemd units")
+	}
+}
+
 func TestRemovalEventMatching(t *testing.T) {
 	c := testConfig()
 	base := map[string]string{"ACTION": "remove", "ID_BUS": "usb", "ID_VENDOR_ID": "0204", "ID_MODEL_ID": "6025", "ID_SERIAL_SHORT": "047894467501"}
