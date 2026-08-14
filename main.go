@@ -20,14 +20,17 @@ import (
 )
 
 const (
-	armedPath           = "/run/usbkill/armed"
 	maxPoweroffAttempts = 3
 	poweroffRetryDelay  = time.Second
 )
 
 var (
-	configPath = "/etc/usbkill/config.yaml"
-	lockPath   = "/run/usbkill/monitor.lock"
+	configPath   = "/etc/usbkill/config.yaml"
+	armedPath    = "/run/usbkill/armed"
+	autoArmPath  = "/etc/usbkill/auto-arm"
+	lockPath     = "/run/usbkill/monitor.lock"
+	systemctlRun = func(args ...string) error { return exec.Command("systemctl", args...).Run() }
+	startMonitor = startUdevMonitor
 )
 
 type Config struct {
@@ -99,6 +102,12 @@ func run(args []string) error {
 		return arm()
 	case "disarm":
 		return disarm()
+	case "enable-autoarm":
+		return enableAutoarm()
+	case "disable-autoarm":
+		return disableAutoarm()
+	case "boot-autoarm":
+		return bootAutoarm()
 	case "daemon":
 		return daemon(false)
 	default:
@@ -107,7 +116,9 @@ func run(args []string) error {
 	}
 }
 
-func usage() { fmt.Println("Usage: usbkill {list|setup|status|test|arm|disarm|daemon}") }
+func usage() {
+	fmt.Println("Usage: usbkill {list|setup|status|test|arm|disarm|enable-autoarm|disable-autoarm|daemon}")
+}
 
 func loadConfig() (Config, error) {
 	info, err := os.Stat(configPath)
@@ -335,13 +346,17 @@ func arm() error {
 	if err != nil {
 		return err
 	}
-	m, err := find(c)
+	ready, err := tokenReady(c, find)
 	if err != nil {
 		return err
 	}
-	if len(m) != 1 {
+	if !ready {
 		return errors.New("refusing to arm: token absent or ambiguous")
 	}
+	return completeArm()
+}
+
+func completeArm() error {
 	if err := os.MkdirAll(filepath.Dir(armedPath), 0750); err != nil {
 		return err
 	}
@@ -356,6 +371,60 @@ func arm() error {
 	return nil
 }
 
+func tokenReady(c Config, finder deviceFinder) (bool, error) {
+	m, err := finder(c)
+	if err != nil {
+		return false, err
+	}
+	return len(m) == 1, nil
+}
+
+func enableAutoarm() error {
+	if _, err := loadConfig(); err != nil {
+		return err
+	}
+	if err := os.WriteFile(autoArmPath, []byte("enabled\n"), 0600); err != nil {
+		return err
+	}
+	if err := systemctl("enable", "usbkill-autoarm.service"); err != nil {
+		_ = os.Remove(autoArmPath)
+		return fmt.Errorf("auto-arm marker written but boot service could not be enabled: %w", err)
+	}
+	fmt.Println("Boot auto-arm enabled. It will arm only when exactly one configured token is present.")
+	return nil
+}
+
+func disableAutoarm() error {
+	if err := systemctl("disable", "--now", "usbkill-autoarm.service"); err != nil {
+		return fmt.Errorf("could not disable boot auto-arm service: %w", err)
+	}
+	if err := os.Remove(autoArmPath); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	fmt.Println("Boot auto-arm disabled.")
+	return nil
+}
+
+func bootAutoarm() error {
+	c, err := loadConfig()
+	if err != nil {
+		return err
+	}
+	return bootAutoarmConfig(c, find)
+}
+
+func bootAutoarmConfig(c Config, finder deviceFinder) error {
+	ready, err := tokenReady(c, finder)
+	if err != nil {
+		return fmt.Errorf("boot auto-arm token discovery failed: %w", err)
+	}
+	if !ready {
+		fmt.Println("Boot auto-arm left watchdog disarmed: token absent or ambiguous.")
+		return nil
+	}
+	return completeArm()
+}
+
 func disarm() error {
 	if err := systemctl("disable", "--now", "usbkill.service"); err != nil {
 		return fmt.Errorf("could not stop and disable service: %w", err)
@@ -368,7 +437,7 @@ func disarm() error {
 }
 
 func systemctl(args ...string) error {
-	return exec.Command("systemctl", args...).Run()
+	return systemctlRun(args...)
 }
 
 func acquireMonitorLock() (*os.File, error) {
@@ -396,11 +465,17 @@ func status() error {
 		return err
 	}
 	_, armedErr := os.Stat(armedPath)
+	_, autoArmErr := os.Stat(autoArmPath)
 	fmt.Printf("Config: valid\nToken: %s\nWatchdog: %s\nPre-poweroff delay: %s\n", c.Serial, presence(len(m)), c.PrePoweroffDelay)
 	if armedErr == nil {
 		fmt.Println("Armed: yes")
 	} else {
 		fmt.Println("Armed: no")
+	}
+	if autoArmErr == nil {
+		fmt.Println("Boot auto-arm: enabled")
+	} else {
+		fmt.Println("Boot auto-arm: disabled")
 	}
 	return nil
 }
@@ -442,11 +517,13 @@ func daemon(test bool) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
-	if err := verifyStartupToken(ctx, c, test, logger, poweroff, find); err != nil {
-		return err
-	}
-	logger.Info("usb token detected", "test_mode", test)
-	return monitor(ctx, c, logger, poweroff, func() { notifyReady(logger) })
+	return monitor(ctx, c, logger, poweroff, func() error {
+		if err := verifyStartupToken(ctx, c, test, logger, poweroff, find); err != nil {
+			return err
+		}
+		logger.Info("usb token detected", "test_mode", test)
+		return nil
+	}, func() { notifyReady(logger) })
 }
 
 func verifyStartupToken(ctx context.Context, c Config, test bool, logger *slog.Logger, poweroff Poweroff, finder deviceFinder) error {
@@ -456,7 +533,10 @@ func verifyStartupToken(ctx context.Context, c Config, test bool, logger *slog.L
 			return fmt.Errorf("token discovery failed: %w", err)
 		}
 		logger.Error("token discovery failed at startup; failing closed", "error", err)
-		return runShutdown(ctx, c, logger, poweroff)
+		if shutdownErr := runShutdown(ctx, c, logger, poweroff); shutdownErr != nil {
+			return shutdownErr
+		}
+		return errors.New("startup token discovery failed; shutdown requested")
 	}
 	if len(m) == 1 {
 		return nil
@@ -465,7 +545,10 @@ func verifyStartupToken(ctx context.Context, c Config, test bool, logger *slog.L
 		return errors.New("configured token absent or ambiguous at startup")
 	}
 	logger.Error("configured token absent or ambiguous at startup; failing closed", "matches", len(m))
-	return runShutdown(ctx, c, logger, poweroff)
+	if shutdownErr := runShutdown(ctx, c, logger, poweroff); shutdownErr != nil {
+		return shutdownErr
+	}
+	return errors.New("configured token absent or ambiguous at startup; shutdown requested")
 }
 
 func removalMatches(props map[string]string, c Config) bool {
@@ -498,21 +581,54 @@ func notifyReady(logger *slog.Logger) {
 	}
 }
 
-func monitor(ctx context.Context, c Config, logger *slog.Logger, poweroff Poweroff, ready func()) error {
+type monitorHandle interface {
+	kill() error
+	wait() error
+}
+
+type commandMonitor struct {
+	cmd *exec.Cmd
+}
+
+func (m commandMonitor) kill() error {
+	if m.cmd.Process == nil {
+		return nil
+	}
+	return m.cmd.Process.Kill()
+}
+
+func (m commandMonitor) wait() error {
+	return m.cmd.Wait()
+}
+
+func startUdevMonitor(ctx context.Context) (io.Reader, monitorHandle, error) {
 	cmd := exec.CommandContext(ctx, "udevadm", "monitor", "--udev", "--property")
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return fmt.Errorf("start udev monitor: %w", err)
+		return nil, nil, fmt.Errorf("start udev monitor: %w", err)
 	}
 	if err = cmd.Start(); err != nil {
-		return fmt.Errorf("start udev monitor: %w", err)
+		return nil, nil, fmt.Errorf("start udev monitor: %w", err)
+	}
+	return stdout, commandMonitor{cmd: cmd}, nil
+}
+
+func monitor(ctx context.Context, c Config, logger *slog.Logger, poweroff Poweroff, startup func() error, ready func()) error {
+	reader, process, err := startMonitor(ctx)
+	if err != nil {
+		return err
+	}
+	if err := startup(); err != nil {
+		_ = process.kill()
+		_ = process.wait()
+		return err
 	}
 	ready()
-	monitorErr := monitorReader(ctx, c, logger, stdout, poweroff)
-	if ctx.Err() == nil && cmd.Process != nil {
-		_ = cmd.Process.Kill()
+	monitorErr := monitorReader(ctx, c, logger, reader, poweroff)
+	if ctx.Err() == nil {
+		_ = process.kill()
 	}
-	waitErr := cmd.Wait()
+	waitErr := process.wait()
 	if ctx.Err() != nil {
 		return nil
 	}

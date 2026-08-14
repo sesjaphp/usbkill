@@ -1,0 +1,13 @@
+[Unit]
+Description=Arm usbkill when its configured USB token is present at boot
+Documentation=https://github.com/sesjaphp/usbkill
+Wants=systemd-udev-settle.service
+After=systemd-udev-settle.service
+ConditionPathExists=/etc/usbkill/auto-arm
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/usbkill boot-autoarm
+
+[Install]
+WantedBy=multi-user.target

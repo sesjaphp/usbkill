@@ -13,7 +13,7 @@ cd usbkill
 makepkg -si
 ```
 
-The `PKGBUILD` is local-source only. After cloning the repository, `makepkg` does not fetch another GitHub source or require a second GitHub login. It installs `/usr/bin/usbkill`, both `usbkill.service` and `usbkill-failure.service`, documentation, and an initially empty `/etc/usbkill` directory. The package declares `util-linux` because the failure notification uses its `logger` command. Installation does not configure, enable, or arm the watchdog.
+The `PKGBUILD` is local-source only. After cloning the repository, `makepkg` does not fetch another GitHub source or require a second GitHub login. It installs `/usr/bin/usbkill`, `usbkill.service`, `usbkill-failure.service`, and `usbkill-autoarm.service`, documentation, and an initially empty `/etc/usbkill` directory. The package declares `util-linux` because the failure notification uses its `logger` command. Installation does not configure, enable, or arm the watchdog.
 
 ## Configure and test
 
@@ -41,7 +41,7 @@ After the removal test succeeds and the token is reconnected, arm the current bo
 sudo usbkill arm
 ```
 
-Remove the configured token. Test mode must report the matching removal and suppress the real poweroff. Reconnect the token afterward. Test mode never requires the armed marker. The armed marker lives in `/run`, so it is intentionally cleared on reboot; after every reboot, reconnect the token before starting normal work and run `sudo usbkill arm` again. If the token is absent at armed-service startup, the service attempts the fail-closed shutdown path. Reconnecting the token after a shutdown does not cancel an already-triggered shutdown; it allows the next boot to verify presence and be re-armed.
+Remove the configured token. Test mode must report the matching removal and suppress the real poweroff. Reconnect the token afterward. Test mode never requires the armed marker. The armed marker lives in `/run`, so it is intentionally cleared on reboot. The watchdog unit is skipped rather than failed while this marker is absent. Reconnecting the token after a shutdown does not cancel an already-triggered shutdown.
 
 Check production monitoring after arming:
 
@@ -52,6 +52,20 @@ journalctl -u usbkill-failure.service -b --no-pager
 ```
 
 `status` reports `PRESENT`, `ABSENT`, or `AMBIGUOUS (n matches)` for the configured identity. An ambiguous state must be investigated before arming.
+
+### Optional boot auto-arm
+
+After you have passed the non-destructive test and deliberately want the watchdog to re-arm on future boots, enable the explicit opt-in setting:
+
+```sh
+sudo usbkill enable-autoarm
+```
+
+At each boot, the one-shot auto-arm unit waits for udev settlement and arms only if exactly one configured token is present. If the token is absent, ambiguous, or discovery fails, it leaves the watchdog disarmed and records the reason; it does not power off the machine. Check the setting with `sudo usbkill status`. Disable future boot auto-arming without disarming the current session using:
+
+```sh
+sudo usbkill disable-autoarm
+```
 
 `disarm` stops and disables the production service before removing the marker:
 
@@ -80,7 +94,7 @@ USB token removed
 
 `pre_poweroff_delay` is only a delay. It is **not** RAM sanitization and must not be interpreted as a memory wipe. The default is zero. The configuration also bounds the shutdown command timeout to 30 seconds; setup uses a 10-second default. If the shutdown command fails, usbkill logs the failure and retries up to three times with a one-second gap. If all attempts fail, the daemon returns failure to systemd without an automatic service restart, and `usbkill-failure.service` writes an `authpriv.alert` journal record. The armed runtime directory is preserved across a service restart, while an explicit stop or reboot still clears the transient armed marker. An armed service fails closed at startup: if the configured token is absent or the device match is ambiguous, it enters the same bounded shutdown path instead of merely exiting.
 
-The daemon treats the first matching removal as authoritative and runs one bounded shutdown sequence; that sequence may contain up to three controlled attempts. Reconnects do not cancel it. An exclusive runtime lock prevents test mode and the production daemon from monitoring concurrently; test mode also refuses to run while the production service is active. Reconnects do not cancel an already scheduled shutdown. Malformed, unrelated, add, change, wrong-VID, wrong-PID, wrong-serial, non-USB, and missing-serial events are ignored.
+The daemon starts the udev monitor before its final startup token verification, so removals that occur during that verification remain queued for event matching. The daemon treats the first matching removal as authoritative and runs one bounded shutdown sequence; that sequence may contain up to three controlled attempts. Reconnects do not cancel it. An exclusive runtime lock prevents test mode and the production daemon from monitoring concurrently; test mode also refuses to run while the production service is active. Reconnects do not cancel an already scheduled shutdown. Malformed, unrelated, add, change, wrong-VID, wrong-PID, wrong-serial, non-USB, and missing-serial events are ignored.
 
 ## Configuration
 
@@ -114,8 +128,9 @@ If the token is lost or the service repeatedly powers off the machine, boot an A
 
 ```sh
 mount /dev/ROOT_PARTITION /mnt
-arch-chroot /mnt systemctl disable usbkill.service
+arch-chroot /mnt systemctl disable usbkill.service usbkill-autoarm.service
 rm -f /mnt/run/usbkill/armed
+rm -f /mnt/etc/usbkill/auto-arm
 rm -f /mnt/etc/usbkill/config.yaml
 ```
 

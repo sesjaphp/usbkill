@@ -41,7 +41,7 @@ go test -race .
 go vet .
 go build -trimpath -o usbkill .
 bash -n PKGBUILD
-systemd-analyze verify usbkill.service usbkill-failure.service
+systemd-analyze verify usbkill.service usbkill-failure.service usbkill-autoarm.service
 git diff --check
 ```
 

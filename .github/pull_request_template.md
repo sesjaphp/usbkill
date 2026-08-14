@@ -22,7 +22,7 @@ Describe the change and why it is needed.
 - [ ] `go vet .`
 - [ ] `go build -trimpath -o usbkill .`
 - [ ] `bash -n PKGBUILD` (when applicable)
-- [ ] `systemd-analyze verify usbkill.service usbkill-failure.service` (when applicable)
+- [ ] `systemd-analyze verify usbkill.service usbkill-failure.service usbkill-autoarm.service` (when applicable)
 - [ ] `makepkg --printsrcinfo > .SRCINFO` and `makepkg -f` on Arch (when applicable)
 
 ## Documentation

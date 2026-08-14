@@ -292,6 +292,118 @@ func TestMonitorReaderEOFFailsClosed(t *testing.T) {
 	}
 }
 
+func TestBootAutoarmArmsOnlyForExactlyOneToken(t *testing.T) {
+	oldArmedPath, oldSystemctlRun := armedPath, systemctlRun
+	armedPath = filepath.Join(t.TempDir(), "armed")
+	defer func() {
+		armedPath = oldArmedPath
+		systemctlRun = oldSystemctlRun
+	}()
+	var calls [][]string
+	systemctlRun = func(args ...string) error {
+		calls = append(calls, append([]string(nil), args...))
+		return nil
+	}
+	finder := func(Config) ([]USB, error) { return []USB{{}}, nil }
+	if err := bootAutoarmConfig(testConfig(), finder); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(armedPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0600 {
+		t.Fatalf("armed marker mode = %o, want 0600", info.Mode().Perm())
+	}
+	if len(calls) != 1 || strings.Join(calls[0], " ") != "enable --now usbkill.service" {
+		t.Fatalf("systemctl calls = %#v", calls)
+	}
+}
+
+func TestBootAutoarmLeavesDisarmedForUnsafeTokenState(t *testing.T) {
+	oldArmedPath, oldSystemctlRun := armedPath, systemctlRun
+	armedPath = filepath.Join(t.TempDir(), "armed")
+	defer func() {
+		armedPath = oldArmedPath
+		systemctlRun = oldSystemctlRun
+	}()
+	systemctlRun = func(args ...string) error {
+		t.Fatalf("unexpected systemctl call: %v", args)
+		return nil
+	}
+	finders := []deviceFinder{
+		func(Config) ([]USB, error) { return nil, nil },
+		func(Config) ([]USB, error) { return []USB{{}, {}}, nil },
+	}
+	for _, finder := range finders {
+		if err := bootAutoarmConfig(testConfig(), finder); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Stat(armedPath); !os.IsNotExist(err) {
+			t.Fatalf("armed marker exists or returned unexpected error: %v", err)
+		}
+	}
+}
+
+func TestBootAutoarmDiscoveryFailureDoesNotArm(t *testing.T) {
+	oldArmedPath, oldSystemctlRun := armedPath, systemctlRun
+	armedPath = filepath.Join(t.TempDir(), "armed")
+	defer func() {
+		armedPath = oldArmedPath
+		systemctlRun = oldSystemctlRun
+	}()
+	systemctlRun = func(args ...string) error {
+		t.Fatalf("unexpected systemctl call: %v", args)
+		return nil
+	}
+	finder := func(Config) ([]USB, error) { return nil, errors.New("udev unavailable") }
+	if err := bootAutoarmConfig(testConfig(), finder); err == nil {
+		t.Fatal("expected discovery failure")
+	}
+	if _, err := os.Stat(armedPath); !os.IsNotExist(err) {
+		t.Fatalf("armed marker exists or returned unexpected error: %v", err)
+	}
+}
+
+func TestAutoarmTogglePersistsOptInAndControlsUnit(t *testing.T) {
+	oldConfigPath, oldAutoArmPath, oldSystemctlRun := configPath, autoArmPath, systemctlRun
+	temp := t.TempDir()
+	configPath = filepath.Join(temp, "config.yaml")
+	autoArmPath = filepath.Join(temp, "auto-arm")
+	defer func() {
+		configPath = oldConfigPath
+		autoArmPath = oldAutoArmPath
+		systemctlRun = oldSystemctlRun
+	}()
+	if err := saveConfig(testConfig()); err != nil {
+		t.Fatal(err)
+	}
+	var calls [][]string
+	systemctlRun = func(args ...string) error {
+		calls = append(calls, append([]string(nil), args...))
+		return nil
+	}
+	if err := enableAutoarm(); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(autoArmPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0600 {
+		t.Fatalf("auto-arm marker mode = %o, want 0600", info.Mode().Perm())
+	}
+	if err := disableAutoarm(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(autoArmPath); !os.IsNotExist(err) {
+		t.Fatalf("auto-arm marker exists or returned unexpected error: %v", err)
+	}
+	if got := []string{strings.Join(calls[0], " "), strings.Join(calls[1], " ")}; strings.Join(got, "|") != "enable usbkill-autoarm.service|disable --now usbkill-autoarm.service" {
+		t.Fatalf("systemctl calls = %#v", calls)
+	}
+}
+
 func TestVerifyStartupTokenFailsClosedInProduction(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	cases := []struct {
@@ -305,8 +417,8 @@ func TestVerifyStartupTokenFailsClosedInProduction(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			mock := &MockPoweroff{}
-			if err := verifyStartupToken(context.Background(), testConfig(), false, logger, mock, tc.finder); err != nil {
-				t.Fatal(err)
+			if err := verifyStartupToken(context.Background(), testConfig(), false, logger, mock, tc.finder); err == nil {
+				t.Fatal("expected startup failure after shutdown request")
 			}
 			if mock.Calls != 1 {
 				t.Fatalf("poweroff calls = %d, want 1", mock.Calls)
@@ -377,6 +489,64 @@ func TestServicePreservesArmedStateAndUsesSingleBoundedFailurePolicy(t *testing.
 		if strings.Contains(unit, forbidden) {
 			t.Fatalf("service unit contains obsolete restart policy %q", forbidden)
 		}
+	}
+}
+
+type fakeMonitor struct {
+	killed bool
+	waited bool
+}
+
+func (m *fakeMonitor) kill() error {
+	m.killed = true
+	return nil
+}
+
+func (m *fakeMonitor) wait() error {
+	m.waited = true
+	return nil
+}
+
+func TestMonitorSubscribesBeforeStartupCheck(t *testing.T) {
+	oldStartMonitor := startMonitor
+	defer func() { startMonitor = oldStartMonitor }()
+	process := &fakeMonitor{}
+	order := []string{}
+	startMonitor = func(context.Context) (io.Reader, monitorHandle, error) {
+		order = append(order, "monitor")
+		return strings.NewReader(""), process, nil
+	}
+	startup := func() error {
+		order = append(order, "startup")
+		return errors.New("stop after startup check")
+	}
+	if err := monitor(context.Background(), testConfig(), slog.New(slog.NewTextHandler(io.Discard, nil)), &MockPoweroff{}, startup, func() { order = append(order, "ready") }); err == nil {
+		t.Fatal("expected startup failure")
+	}
+	if strings.Join(order, ",") != "monitor,startup" {
+		t.Fatalf("order = %v", order)
+	}
+	if !process.killed || !process.waited {
+		t.Fatalf("monitor cleanup killed=%v waited=%v", process.killed, process.waited)
+	}
+}
+
+func TestAutoarmUnitIsOptInAndWatchdogIsArmedGated(t *testing.T) {
+	autoarm, err := os.ReadFile("usbkill-autoarm.service")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"ConditionPathExists=/etc/usbkill/auto-arm", "After=systemd-udev-settle.service", "ExecStart=/usr/bin/usbkill boot-autoarm"} {
+		if !strings.Contains(string(autoarm), want) {
+			t.Fatalf("auto-arm unit missing %q", want)
+		}
+	}
+	watchdog, err := os.ReadFile("usbkill.service")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(watchdog), "ConditionPathExists=/run/usbkill/armed") {
+		t.Fatal("watchdog unit is not gated by the armed marker")
 	}
 }
 

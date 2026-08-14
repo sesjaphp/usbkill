@@ -18,6 +18,7 @@ install: build
 	install -Dm0755 usbkill /usr/bin/usbkill
 	install -Dm0644 usbkill.service /usr/lib/systemd/system/usbkill.service
 	install -Dm0644 usbkill-failure.service /usr/lib/systemd/system/usbkill-failure.service
+	install -Dm0644 usbkill-autoarm.service /usr/lib/systemd/system/usbkill-autoarm.service
 	install -dm0750 /etc/usbkill
 	systemctl daemon-reload
 
@@ -25,7 +26,7 @@ package:
 	makepkg -f
 
 check-service-hardening:
-	systemd-analyze verify usbkill.service usbkill-failure.service
+	systemd-analyze verify usbkill.service usbkill-failure.service usbkill-autoarm.service
 	@if systemctl is-system-running >/dev/null 2>&1; then \
 		if output=$$(systemd-run --quiet --wait --pipe --property=NoNewPrivileges=yes /usr/bin/grep -q '^NoNewPrivs:[[:space:]]*1' /proc/self/status 2>&1); then \
 			echo 'NoNewPrivileges runtime probe passed'; \
