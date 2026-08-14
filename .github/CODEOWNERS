@@ -7,4 +7,7 @@
 /usbkill.service @sesjaphp
 /Makefile @sesjaphp
 /SECURITY.md @sesjaphp
+/CONTRIBUTING.md @sesjaphp
+/README.md @sesjaphp
 /docs/ @sesjaphp
+/.github/ @sesjaphp

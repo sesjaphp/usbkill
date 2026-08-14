@@ -17,6 +17,7 @@ vet:
 install: build
 	install -Dm0755 usbkill /usr/bin/usbkill
 	install -Dm0644 usbkill.service /usr/lib/systemd/system/usbkill.service
+	install -Dm0644 usbkill-failure.service /usr/lib/systemd/system/usbkill-failure.service
 	install -dm0750 /etc/usbkill
 	systemctl daemon-reload
 

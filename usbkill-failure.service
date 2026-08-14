@@ -1,0 +1,7 @@
+[Unit]
+Description=Record usbkill watchdog failure
+Documentation=https://github.com/sesjaphp/usbkill
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/logger -p authpriv.alert -t usbkill "usbkill exhausted its bounded shutdown attempts; inspect journalctl -u usbkill.service -b immediately"

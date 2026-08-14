@@ -4,7 +4,7 @@ Thank you for helping improve `usbkill`. It is a small security-sensitive Arch L
 
 ## Before you start
 
-Read the [README](README.md), [security model](docs/security.md), and [SECURITY.md](SECURITY.md). Do not include real USB serial numbers, private system logs, disk identifiers, credentials, or other device-identifying information in issues or pull requests.
+Read the [README](README.md), [architecture overview](docs/architecture.md), and [SECURITY.md](SECURITY.md). Do not include real USB serial numbers, private system logs, disk identifiers, credentials, or other device-identifying information in issues or pull requests.
 
 For security vulnerabilities, do not open a public issue. Follow the private reporting instructions in `SECURITY.md`.
 
@@ -37,7 +37,6 @@ Run the following before opening a pull request:
 ```sh
 gofmt -w main.go main_test.go
 go test .
-go test ./...
 go test -race .
 go vet .
 go build -trimpath -o usbkill .

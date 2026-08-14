@@ -18,7 +18,6 @@ Describe the change and why it is needed.
 
 - [ ] `gofmt -w main.go main_test.go`
 - [ ] `go test .`
-- [ ] `go test ./...`
 - [ ] `go test -race .`
 - [ ] `go vet .`
 - [ ] `go build -trimpath -o usbkill .`

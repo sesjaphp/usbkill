@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -148,12 +149,17 @@ func TestShutdownDelayCancellation(t *testing.T) {
 }
 
 func TestShutdownFailureReturned(t *testing.T) {
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, nil))
 	mock := &MockPoweroff{Err: errors.New("poweroff failed")}
-	if err := runShutdown(context.Background(), testConfig(), slog.Default(), mock); err == nil {
+	if err := runShutdown(context.Background(), testConfig(), logger, mock); err == nil {
 		t.Fatal("expected failure")
 	}
 	if mock.Calls != maxPoweroffAttempts {
 		t.Fatalf("calls = %d, want %d", mock.Calls, maxPoweroffAttempts)
+	}
+	if !strings.Contains(logs.String(), "shutdown attempts exhausted") {
+		t.Fatal("missing shutdown exhaustion log")
 	}
 }
 

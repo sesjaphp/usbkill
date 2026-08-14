@@ -48,6 +48,7 @@ Check production monitoring after arming:
 ```sh
 sudo usbkill status
 journalctl -u usbkill.service -f
+journalctl -u usbkill-failure.service -b --no-pager
 ```
 
 `disarm` stops and disables the production service before removing the armed marker:
@@ -75,7 +76,7 @@ USB token removed
     -> bounded systemctl poweroff
 ```
 
-`pre_poweroff_delay` is only a delay. It is **not** RAM sanitization and must not be interpreted as a memory wipe. The default is zero. The configuration also bounds the shutdown command timeout to 30 seconds; setup uses a 10-second default. If the shutdown command fails, usbkill logs the failure and retries up to three times with a one-second gap. An armed service fails closed at startup: if the configured token is absent or the device match is ambiguous, it enters the same bounded shutdown path instead of merely exiting.
+`pre_poweroff_delay` is only a delay. It is **not** RAM sanitization and must not be interpreted as a memory wipe. The default is zero. The configuration also bounds the shutdown command timeout to 30 seconds; setup uses a 10-second default. If the shutdown command fails, usbkill logs the failure and retries up to three times with a one-second gap. If all attempts fail, it returns failure to systemd; systemd allows at most three restart cycles in 60 seconds and then runs `usbkill-failure.service`, which writes an `authpriv.alert` journal record. An armed service fails closed at startup: if the configured token is absent or the device match is ambiguous, it enters the same bounded shutdown path instead of merely exiting.
 
 The daemon treats the first matching removal as authoritative and runs one bounded shutdown sequence; that sequence may contain up to three controlled attempts. Reconnects do not cancel it. An exclusive runtime lock prevents test mode and the production daemon from monitoring concurrently; test mode also refuses to run while the production service is active. Reconnects do not cancel an already scheduled shutdown. Malformed, unrelated, add, change, wrong-VID, wrong-PID, wrong-serial, non-USB, and missing-serial events are ignored.
 

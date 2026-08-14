@@ -538,7 +538,7 @@ func runShutdown(ctx context.Context, c Config, logger *slog.Logger, poweroff Po
 			return nil
 		}
 		lastErr = err
-		logger.Error("shutdown command failed", "attempt", attempt, "error", err)
+		logger.Error("shutdown command failed", "attempt", attempt, "max_attempts", maxPoweroffAttempts, "error", err)
 		if attempt < maxPoweroffAttempts {
 			timer := time.NewTimer(poweroffRetryDelay)
 			select {
@@ -549,5 +549,6 @@ func runShutdown(ctx context.Context, c Config, logger *slog.Logger, poweroff Po
 			}
 		}
 	}
+	logger.Error("shutdown attempts exhausted; returning failure to systemd", "attempts", maxPoweroffAttempts, "error", lastErr)
 	return fmt.Errorf("shutdown failed after %d attempts: %w", maxPoweroffAttempts, lastErr)
 }

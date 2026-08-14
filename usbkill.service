@@ -5,15 +5,19 @@ After=systemd-udev-settle.service
 Wants=systemd-udev-settle.service
 Conflicts=shutdown.target reboot.target halt.target
 Before=shutdown.target reboot.target halt.target
+OnFailure=usbkill-failure.service
+StartLimitIntervalSec=60
+StartLimitBurst=3
 
 [Service]
 Type=simple
 ExecStart=/usr/bin/usbkill daemon
 Restart=on-failure
-RestartSec=2s
+RestartSec=5s
 KillSignal=SIGTERM
 RuntimeDirectory=usbkill
 RuntimeDirectoryMode=0750
+UMask=0077
 PrivateTmp=yes
 ProtectHome=yes
 ProtectSystem=full

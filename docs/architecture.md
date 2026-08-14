@@ -6,7 +6,7 @@
 
 The CLI has separate setup, status, test, arm, disarm, and daemon paths. Setup enumerates physical USB storage devices, skips partitions, requires a stable serial number, and atomically writes a root-owned configuration. Test mode loads the configuration and uses an injected mock poweroff implementation. Arm verifies exactly one matching token, creates the transient armed marker, and enables the production service. Disarm stops and disables the service before removing the marker.
 
-The production daemon requires the armed marker, acquires an exclusive monitor lock, verifies exactly one matching token, and then monitors udev property events. A matching removal is authoritative. The daemon schedules the configured pre-poweroff delay and invokes a fixed-argument, bounded `systemctl --no-ask-password --ignore-inhibitors poweroff` command. Failed attempts are logged and retried within a fixed bound.
+The production daemon requires the armed marker, acquires an exclusive monitor lock, verifies exactly one matching token, and then monitors udev property events. A matching removal is authoritative. The daemon schedules the configured pre-poweroff delay and invokes a fixed-argument, bounded `systemctl --no-ask-password --ignore-inhibitors poweroff` command. Failed attempts are logged and retried within a fixed bound. If all attempts fail, the daemon returns failure to systemd; the unit permits only three restart cycles in 60 seconds, then invokes `usbkill-failure.service` to record an `authpriv.alert` journal entry.
 
 ## Safety boundaries
 
