@@ -55,4 +55,4 @@ Use focused commits with imperative subjects. Keep unrelated formatting or refac
 
 ## Pull requests
 
-Open a pull request against `main` using the repository template. A maintainer will review security-sensitive changes carefully. Run the required local checks before opening a pull request; if public CI is enabled for the repository, it must pass as well. Automated checks cannot replace human review of changes affecting poweroff behavior.
+Open a pull request against `main` using the repository template. A maintainer will review security-sensitive changes carefully. Run the required local checks before opening a pull request. GitHub Actions CI must also pass. Automated checks cannot replace human review of changes affecting poweroff behavior.
