@@ -112,14 +112,14 @@ func TestCorrectRemovalRequestsShutdownOnce(t *testing.T) {
 	}
 }
 
-func TestNonMatchingEventsDoNotShutdown(t *testing.T) {
+func TestEndedNonMatchingStreamFailsClosed(t *testing.T) {
 	input := "ACTION=add\nID_BUS=usb\nID_VENDOR_ID=0204\nID_MODEL_ID=6025\nID_SERIAL_SHORT=047894467501\n\nACTION=remove\nID_BUS=usb\nID_VENDOR_ID=9999\nID_MODEL_ID=6025\nID_SERIAL_SHORT=047894467501\n\n"
 	mock := &MockPoweroff{}
 	if err := monitorReader(context.Background(), testConfig(), slog.Default(), strings.NewReader(input), mock); err != nil {
 		t.Fatal(err)
 	}
-	if mock.Calls != 0 {
-		t.Fatalf("poweroff calls = %d", mock.Calls)
+	if mock.Calls != 1 {
+		t.Fatalf("poweroff calls = %d, want 1", mock.Calls)
 	}
 }
 
@@ -174,10 +174,70 @@ type blockingPoweroff struct{}
 
 func (*blockingPoweroff) Run(ctx context.Context) error { <-ctx.Done(); return ctx.Err() }
 
-func TestMonitorReaderPropagatesReaderError(t *testing.T) {
-	reader := &errorReader{}
-	if err := monitorReader(context.Background(), testConfig(), slog.Default(), reader, &MockPoweroff{}); err == nil {
-		t.Fatal("expected reader error")
+func TestMonitorReaderFailureFailsClosed(t *testing.T) {
+	mock := &MockPoweroff{}
+	if err := monitorReader(context.Background(), testConfig(), slog.Default(), &errorReader{}, mock); err != nil {
+		t.Fatal(err)
+	}
+	if mock.Calls != 1 {
+		t.Fatalf("poweroff calls = %d, want 1", mock.Calls)
+	}
+}
+
+func TestMonitorReaderEOFFailsClosed(t *testing.T) {
+	mock := &MockPoweroff{}
+	if err := monitorReader(context.Background(), testConfig(), slog.Default(), strings.NewReader(""), mock); err != nil {
+		t.Fatal(err)
+	}
+	if mock.Calls != 1 {
+		t.Fatalf("poweroff calls = %d, want 1", mock.Calls)
+	}
+}
+
+func TestVerifyStartupTokenFailsClosedInProduction(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	cases := []struct {
+		name   string
+		finder deviceFinder
+	}{
+		{"discovery error", func(Config) ([]USB, error) { return nil, errors.New("udev unavailable") }},
+		{"absent", func(Config) ([]USB, error) { return nil, nil }},
+		{"ambiguous", func(Config) ([]USB, error) { return []USB{{}, {}}, nil }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			mock := &MockPoweroff{}
+			if err := verifyStartupToken(context.Background(), testConfig(), false, logger, mock, tc.finder); err != nil {
+				t.Fatal(err)
+			}
+			if mock.Calls != 1 {
+				t.Fatalf("poweroff calls = %d, want 1", mock.Calls)
+			}
+		})
+	}
+}
+
+func TestVerifyStartupTokenIsNonDestructiveInTestMode(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	mock := &MockPoweroff{}
+	finder := func(Config) ([]USB, error) { return nil, errors.New("udev unavailable") }
+	if err := verifyStartupToken(context.Background(), testConfig(), true, logger, mock, finder); err == nil {
+		t.Fatal("expected test-mode discovery error")
+	}
+	if mock.Calls != 0 {
+		t.Fatalf("poweroff calls = %d, want 0", mock.Calls)
+	}
+}
+
+func TestVerifyStartupTokenAcceptsExactlyOneMatch(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	mock := &MockPoweroff{}
+	finder := func(Config) ([]USB, error) { return []USB{{}}, nil }
+	if err := verifyStartupToken(context.Background(), testConfig(), false, logger, mock, finder); err != nil {
+		t.Fatal(err)
+	}
+	if mock.Calls != 0 {
+		t.Fatalf("poweroff calls = %d, want 0", mock.Calls)
 	}
 }
 

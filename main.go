@@ -400,6 +400,8 @@ func present(n int) string {
 	return "ABSENT"
 }
 
+type deviceFinder func(Config) ([]USB, error)
+
 func daemon(test bool) error {
 	c, err := loadConfig()
 	if err != nil {
@@ -421,22 +423,33 @@ func daemon(test bool) error {
 		return err
 	}
 	defer func() { _ = syscall.Flock(int(lock.Fd()), syscall.LOCK_UN); _ = lock.Close() }()
-	m, err := find(c)
-	if err != nil {
-		return err
-	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
-	if len(m) != 1 {
-		if test {
-			return errors.New("configured token absent or ambiguous at startup")
-		}
-		logger.Error("configured token absent or ambiguous at startup; failing closed")
-		return runShutdown(ctx, c, logger, poweroff)
+	if err := verifyStartupToken(ctx, c, test, logger, poweroff, find); err != nil {
+		return err
 	}
 	logger.Info("usb token detected", "test_mode", test)
 	return monitor(ctx, c, logger, poweroff)
+}
+
+func verifyStartupToken(ctx context.Context, c Config, test bool, logger *slog.Logger, poweroff Poweroff, finder deviceFinder) error {
+	m, err := finder(c)
+	if err != nil {
+		if test {
+			return fmt.Errorf("token discovery failed: %w", err)
+		}
+		logger.Error("token discovery failed at startup; failing closed", "error", err)
+		return runShutdown(ctx, c, logger, poweroff)
+	}
+	if len(m) == 1 {
+		return nil
+	}
+	if test {
+		return errors.New("configured token absent or ambiguous at startup")
+	}
+	logger.Error("configured token absent or ambiguous at startup; failing closed", "matches", len(m))
+	return runShutdown(ctx, c, logger, poweroff)
 }
 
 func removalMatches(props map[string]string, c Config) bool {
@@ -454,17 +467,26 @@ func monitor(ctx context.Context, c Config, logger *slog.Logger, poweroff Powero
 	cmd := exec.CommandContext(ctx, "udevadm", "monitor", "--udev", "--property")
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return err
+		return fmt.Errorf("start udev monitor: %w", err)
 	}
 	if err = cmd.Start(); err != nil {
-		return err
+		return fmt.Errorf("start udev monitor: %w", err)
 	}
-	defer func() {
-		if waitErr := cmd.Wait(); waitErr != nil && ctx.Err() == nil {
-			logger.Error("udev monitor exited", "error", waitErr)
-		}
-	}()
-	return monitorReader(ctx, c, logger, stdout, poweroff)
+	monitorErr := monitorReader(ctx, c, logger, stdout, poweroff)
+	if ctx.Err() == nil && cmd.Process != nil {
+		_ = cmd.Process.Kill()
+	}
+	waitErr := cmd.Wait()
+	if ctx.Err() != nil {
+		return nil
+	}
+	if monitorErr != nil {
+		return monitorErr
+	}
+	if waitErr != nil {
+		return fmt.Errorf("udev monitor exited: %w", waitErr)
+	}
+	return errors.New("udev monitor exited unexpectedly")
 }
 
 func monitorReader(ctx context.Context, c Config, logger *slog.Logger, reader io.Reader, poweroff Poweroff) error {
@@ -484,7 +506,15 @@ func monitorReader(ctx context.Context, c Config, logger *slog.Logger, reader io
 			props[k] = v
 		}
 	}
-	return scanner.Err()
+	if ctx.Err() != nil {
+		return nil
+	}
+	if err := scanner.Err(); err != nil {
+		logger.Error("udev monitor stream failed; failing closed", "error", err)
+		return runShutdown(ctx, c, logger, poweroff)
+	}
+	logger.Error("udev monitor stream ended unexpectedly; failing closed")
+	return runShutdown(ctx, c, logger, poweroff)
 }
 
 func runShutdown(ctx context.Context, c Config, logger *slog.Logger, poweroff Poweroff) error {
