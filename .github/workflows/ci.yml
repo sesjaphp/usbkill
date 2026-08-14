@@ -40,8 +40,8 @@ jobs:
       - name: Validate package metadata and scripts
         run: |
           bash -n PKGBUILD
-          grep -q '^pkgver = ' .SRCINFO
-          grep -q '^pkgname = usbkill$' .SRCINFO
+          grep -q '^[[:space:]]*pkgver = ' .SRCINFO
+          grep -q '^pkgbase = usbkill$' .SRCINFO
 
       - name: Validate systemd units
         run: systemd-analyze verify usbkill.service usbkill-failure.service usbkill-autoarm.service
