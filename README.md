@@ -41,7 +41,7 @@ After the removal test succeeds and the token is reconnected, arm the current bo
 sudo usbkill arm
 ```
 
-Remove the configured token. Test mode must report the matching removal and suppress the real poweroff. Reconnect the token afterward. Test mode never requires the armed marker. The armed marker lives in `/run`, so it is intentionally cleared on reboot. The watchdog unit is skipped rather than failed while this marker is absent. Reconnecting the token after a shutdown does not cancel an already-triggered shutdown.
+Remove the configured token. A successful test must report the matching removal followed by `TEST MODE: poweroff suppressed`, then exit without an error. Test mode never invokes a real poweroff. Reconnect the token afterward. If it reports `TEST MODE: udev monitor stream ...; poweroff suppressed`, no poweroff occurred, but the test failed and must be investigated before arming. Test mode never requires the armed marker. The armed marker lives in `/run`, so it is intentionally cleared on reboot. The watchdog unit is skipped rather than failed while this marker is absent. Reconnecting the token after a shutdown does not cancel an already-triggered shutdown.
 
 Check production monitoring after arming:
 

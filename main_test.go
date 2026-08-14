@@ -197,22 +197,22 @@ func TestRemovalEventMatching(t *testing.T) {
 func TestCorrectRemovalRequestsShutdownOnce(t *testing.T) {
 	input := "ACTION=remove\nID_BUS=usb\nID_VENDOR_ID=0204\nID_MODEL_ID=6025\nID_SERIAL_SHORT=047894467501\n\n"
 	mock := &MockPoweroff{}
-	if err := monitorReader(context.Background(), testConfig(), slog.Default(), strings.NewReader(input), mock); err != nil {
-		t.Fatal(err)
+	if err := monitorReader(context.Background(), testConfig(), slog.Default(), strings.NewReader(input), mock); !errors.Is(err, errShutdownHandled) {
+		t.Fatalf("monitor error = %v, want handled shutdown", err)
 	}
 	if mock.Calls != 1 {
 		t.Fatalf("poweroff calls = %d", mock.Calls)
 	}
 }
 
-func TestEndedNonMatchingStreamFailsClosed(t *testing.T) {
+func TestTestModeEndedNonMatchingStreamIsNonDestructive(t *testing.T) {
 	input := "ACTION=add\nID_BUS=usb\nID_VENDOR_ID=0204\nID_MODEL_ID=6025\nID_SERIAL_SHORT=047894467501\n\nACTION=remove\nID_BUS=usb\nID_VENDOR_ID=9999\nID_MODEL_ID=6025\nID_SERIAL_SHORT=047894467501\n\n"
 	mock := &MockPoweroff{}
-	if err := monitorReader(context.Background(), testConfig(), slog.Default(), strings.NewReader(input), mock); err != nil {
-		t.Fatal(err)
+	if err := monitorReader(context.Background(), testConfig(), slog.Default(), strings.NewReader(input), mock); err == nil {
+		t.Fatal("expected test-mode stream error")
 	}
-	if mock.Calls != 1 {
-		t.Fatalf("poweroff calls = %d, want 1", mock.Calls)
+	if mock.Calls != 0 {
+		t.Fatalf("poweroff calls = %d, want 0", mock.Calls)
 	}
 }
 
@@ -270,25 +270,47 @@ func TestShutdownTimeoutIsBounded(t *testing.T) {
 
 type blockingPoweroff struct{}
 
+type successfulPoweroff struct {
+	Calls int
+}
+
 func (*blockingPoweroff) Run(ctx context.Context) error { <-ctx.Done(); return ctx.Err() }
 
+func (p *successfulPoweroff) Run(context.Context) error {
+	p.Calls++
+	return nil
+}
+
 func TestMonitorReaderFailureFailsClosed(t *testing.T) {
-	mock := &MockPoweroff{}
-	if err := monitorReader(context.Background(), testConfig(), slog.Default(), &errorReader{}, mock); err != nil {
-		t.Fatal(err)
+	poweroff := &successfulPoweroff{}
+	if err := monitorReader(context.Background(), testConfig(), slog.Default(), &errorReader{}, poweroff); !errors.Is(err, errShutdownHandled) {
+		t.Fatalf("monitor error = %v, want handled shutdown", err)
 	}
-	if mock.Calls != 1 {
-		t.Fatalf("poweroff calls = %d, want 1", mock.Calls)
+	if poweroff.Calls != 1 {
+		t.Fatalf("poweroff calls = %d, want 1", poweroff.Calls)
 	}
 }
 
 func TestMonitorReaderEOFFailsClosed(t *testing.T) {
-	mock := &MockPoweroff{}
-	if err := monitorReader(context.Background(), testConfig(), slog.Default(), strings.NewReader(""), mock); err != nil {
-		t.Fatal(err)
+	poweroff := &successfulPoweroff{}
+	if err := monitorReader(context.Background(), testConfig(), slog.Default(), strings.NewReader(""), poweroff); !errors.Is(err, errShutdownHandled) {
+		t.Fatalf("monitor error = %v, want handled shutdown", err)
 	}
-	if mock.Calls != 1 {
-		t.Fatalf("poweroff calls = %d, want 1", mock.Calls)
+	if poweroff.Calls != 1 {
+		t.Fatalf("poweroff calls = %d, want 1", poweroff.Calls)
+	}
+}
+
+func TestTestModeMonitorReaderErrorsAreNonDestructive(t *testing.T) {
+	cases := []io.Reader{&errorReader{}, strings.NewReader("")}
+	for _, reader := range cases {
+		mock := &MockPoweroff{}
+		if err := monitorReader(context.Background(), testConfig(), slog.Default(), reader, mock); err == nil {
+			t.Fatal("expected test-mode monitor error")
+		}
+		if mock.Calls != 0 {
+			t.Fatalf("poweroff calls = %d, want 0", mock.Calls)
+		}
 	}
 }
 
@@ -417,8 +439,8 @@ func TestVerifyStartupTokenFailsClosedInProduction(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			mock := &MockPoweroff{}
-			if err := verifyStartupToken(context.Background(), testConfig(), false, logger, mock, tc.finder); err == nil {
-				t.Fatal("expected startup failure after shutdown request")
+			if err := verifyStartupToken(context.Background(), testConfig(), false, logger, mock, tc.finder); !errors.Is(err, errShutdownHandled) {
+				t.Fatalf("startup error = %v, want handled shutdown", err)
 			}
 			if mock.Calls != 1 {
 				t.Fatalf("poweroff calls = %d, want 1", mock.Calls)
@@ -493,8 +515,9 @@ func TestServicePreservesArmedStateAndUsesSingleBoundedFailurePolicy(t *testing.
 }
 
 type fakeMonitor struct {
-	killed bool
-	waited bool
+	killed  bool
+	waited  bool
+	waitErr error
 }
 
 func (m *fakeMonitor) kill() error {
@@ -504,7 +527,7 @@ func (m *fakeMonitor) kill() error {
 
 func (m *fakeMonitor) wait() error {
 	m.waited = true
-	return nil
+	return m.waitErr
 }
 
 func TestMonitorSubscribesBeforeStartupCheck(t *testing.T) {
@@ -528,6 +551,61 @@ func TestMonitorSubscribesBeforeStartupCheck(t *testing.T) {
 	}
 	if !process.killed || !process.waited {
 		t.Fatalf("monitor cleanup killed=%v waited=%v", process.killed, process.waited)
+	}
+}
+
+func TestMonitorReturnsSuccessAfterStartupShutdown(t *testing.T) {
+	oldStartMonitor := startMonitor
+	defer func() { startMonitor = oldStartMonitor }()
+	process := &fakeMonitor{waitErr: errors.New("signal: killed")}
+	startMonitor = func(context.Context) (io.Reader, monitorHandle, error) {
+		return strings.NewReader(""), process, nil
+	}
+	ready := false
+	if err := monitor(context.Background(), testConfig(), slog.New(slog.NewTextHandler(io.Discard, nil)), &MockPoweroff{}, func() error { return errShutdownHandled }, func() { ready = true }); err != nil {
+		t.Fatalf("monitor error = %v, want nil", err)
+	}
+	if ready || !process.killed || !process.waited {
+		t.Fatalf("ready=%v killed=%v waited=%v", ready, process.killed, process.waited)
+	}
+}
+
+func TestMonitorReturnsSuccessAfterHandledShutdown(t *testing.T) {
+	oldStartMonitor := startMonitor
+	defer func() { startMonitor = oldStartMonitor }()
+	process := &fakeMonitor{waitErr: errors.New("signal: killed")}
+	startMonitor = func(context.Context) (io.Reader, monitorHandle, error) {
+		return strings.NewReader("ACTION=remove\nID_BUS=usb\nID_VENDOR_ID=0204\nID_MODEL_ID=6025\nID_SERIAL_SHORT=047894467501\n\n"), process, nil
+	}
+	mock := &MockPoweroff{}
+	ready := false
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	if err := monitor(context.Background(), testConfig(), logger, mock, func() error { return nil }, func() { ready = true }); err != nil {
+		t.Fatalf("monitor error = %v, want nil", err)
+	}
+	if mock.Calls != 1 {
+		t.Fatalf("poweroff calls = %d, want 1", mock.Calls)
+	}
+	if !ready || !process.killed || !process.waited {
+		t.Fatalf("ready=%v killed=%v waited=%v", ready, process.killed, process.waited)
+	}
+}
+
+func TestTestModeShutdownLogsSuppression(t *testing.T) {
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, nil))
+	mock := &MockPoweroff{}
+	if err := runShutdown(context.Background(), testConfig(), logger, mock); err != nil {
+		t.Fatal(err)
+	}
+	if mock.Calls != 1 {
+		t.Fatalf("poweroff calls = %d, want 1", mock.Calls)
+	}
+	if !strings.Contains(logs.String(), "TEST MODE: poweroff suppressed") {
+		t.Fatalf("missing test-mode suppression log: %s", logs.String())
+	}
+	if strings.Contains(logs.String(), "shutdown command executed") {
+		t.Fatalf("test-mode log misreported a real shutdown: %s", logs.String())
 	}
 }
 

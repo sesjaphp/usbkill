@@ -25,12 +25,13 @@ const (
 )
 
 var (
-	configPath   = "/etc/usbkill/config.yaml"
-	armedPath    = "/run/usbkill/armed"
-	autoArmPath  = "/etc/usbkill/auto-arm"
-	lockPath     = "/run/usbkill/monitor.lock"
-	systemctlRun = func(args ...string) error { return exec.Command("systemctl", args...).Run() }
-	startMonitor = startUdevMonitor
+	errShutdownHandled = errors.New("shutdown handled")
+	configPath         = "/etc/usbkill/config.yaml"
+	armedPath          = "/run/usbkill/armed"
+	autoArmPath        = "/etc/usbkill/auto-arm"
+	lockPath           = "/run/usbkill/monitor.lock"
+	systemctlRun       = func(args ...string) error { return exec.Command("systemctl", args...).Run() }
+	startMonitor       = startUdevMonitor
 )
 
 type Config struct {
@@ -536,7 +537,7 @@ func verifyStartupToken(ctx context.Context, c Config, test bool, logger *slog.L
 		if shutdownErr := runShutdown(ctx, c, logger, poweroff); shutdownErr != nil {
 			return shutdownErr
 		}
-		return errors.New("startup token discovery failed; shutdown requested")
+		return errShutdownHandled
 	}
 	if len(m) == 1 {
 		return nil
@@ -548,7 +549,7 @@ func verifyStartupToken(ctx context.Context, c Config, test bool, logger *slog.L
 	if shutdownErr := runShutdown(ctx, c, logger, poweroff); shutdownErr != nil {
 		return shutdownErr
 	}
-	return errors.New("configured token absent or ambiguous at startup; shutdown requested")
+	return errShutdownHandled
 }
 
 func removalMatches(props map[string]string, c Config) bool {
@@ -621,17 +622,23 @@ func monitor(ctx context.Context, c Config, logger *slog.Logger, poweroff Powero
 	if err := startup(); err != nil {
 		_ = process.kill()
 		_ = process.wait()
+		if errors.Is(err, errShutdownHandled) {
+			return nil
+		}
 		return err
 	}
 	ready()
 	monitorErr := monitorReader(ctx, c, logger, reader, poweroff)
-	if ctx.Err() == nil {
-		_ = process.kill()
-	}
-	waitErr := process.wait()
 	if ctx.Err() != nil {
 		return nil
 	}
+	if errors.Is(monitorErr, errShutdownHandled) {
+		_ = process.kill()
+		_ = process.wait()
+		return nil
+	}
+	_ = process.kill()
+	waitErr := process.wait()
 	if monitorErr != nil {
 		return monitorErr
 	}
@@ -649,7 +656,7 @@ func monitorReader(ctx context.Context, c Config, logger *slog.Logger, reader io
 		if line == "" {
 			if removalMatches(props, c) {
 				logger.Warn("USB token removed; shutdown scheduled")
-				return runShutdown(ctx, c, logger, poweroff)
+				return handledShutdown(ctx, c, logger, poweroff)
 			}
 			props = make(map[string]string)
 			continue
@@ -662,11 +669,31 @@ func monitorReader(ctx context.Context, c Config, logger *slog.Logger, reader io
 		return nil
 	}
 	if err := scanner.Err(); err != nil {
+		if isTestPoweroff(poweroff) {
+			logger.Error("TEST MODE: udev monitor stream failed; poweroff suppressed", "error", err)
+			return fmt.Errorf("test mode udev monitor stream failed: %w", err)
+		}
 		logger.Error("udev monitor stream failed; failing closed", "error", err)
-		return runShutdown(ctx, c, logger, poweroff)
+		return handledShutdown(ctx, c, logger, poweroff)
+	}
+	if isTestPoweroff(poweroff) {
+		logger.Error("TEST MODE: udev monitor stream ended unexpectedly; poweroff suppressed")
+		return errors.New("test mode udev monitor stream ended unexpectedly")
 	}
 	logger.Error("udev monitor stream ended unexpectedly; failing closed")
-	return runShutdown(ctx, c, logger, poweroff)
+	return handledShutdown(ctx, c, logger, poweroff)
+}
+
+func handledShutdown(ctx context.Context, c Config, logger *slog.Logger, poweroff Poweroff) error {
+	if err := runShutdown(ctx, c, logger, poweroff); err != nil {
+		return err
+	}
+	return errShutdownHandled
+}
+
+func isTestPoweroff(poweroff Poweroff) bool {
+	_, ok := poweroff.(*MockPoweroff)
+	return ok
 }
 
 func runShutdown(ctx context.Context, c Config, logger *slog.Logger, poweroff Poweroff) error {
@@ -686,7 +713,11 @@ func runShutdown(ctx context.Context, c Config, logger *slog.Logger, poweroff Po
 		err := poweroff.Run(pctx)
 		cancel()
 		if err == nil {
-			logger.Info("shutdown command executed", "attempt", attempt)
+			if isTestPoweroff(poweroff) {
+				logger.Warn("TEST MODE: poweroff suppressed", "attempt", attempt)
+			} else {
+				logger.Info("shutdown command executed", "attempt", attempt)
+			}
 			return nil
 		}
 		lastErr = err

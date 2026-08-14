@@ -38,7 +38,7 @@ sudo usbkill setup
 sudo usbkill test
 ```
 
-While test mode is running, remove the configured token. The expected final log is `TEST MODE: poweroff suppressed`. Reconnect the token, then inspect the state:
+While test mode is running, remove the configured token. The expected final log is `TEST MODE: poweroff suppressed`, and the command must exit without an error. If test mode instead reports a `TEST MODE: udev monitor stream ...; poweroff suppressed` message, no poweroff occurred, but the monitor test failed and production arming must not proceed. Reconnect the token, then inspect the state:
 
 ```sh
 sudo usbkill status
