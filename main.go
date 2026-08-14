@@ -22,6 +22,8 @@ import (
 const (
 	maxPoweroffAttempts = 3
 	poweroffRetryDelay  = time.Second
+	systemctlPath       = "/usr/bin/systemctl"
+	udevadmPath         = "/usr/bin/udevadm"
 )
 
 var (
@@ -30,7 +32,8 @@ var (
 	armedPath          = "/run/usbkill/armed"
 	autoArmPath        = "/etc/usbkill/auto-arm"
 	lockPath           = "/run/usbkill/monitor.lock"
-	systemctlRun       = func(args ...string) error { return exec.Command("systemctl", args...).Run() }
+	systemctlRun       = func(args ...string) error { return exec.Command(systemctlPath, args...).Run() }
+	systemctlOutput    = func(args ...string) ([]byte, error) { return exec.Command(systemctlPath, args...).Output() }
 	startMonitor       = startUdevMonitor
 )
 
@@ -58,7 +61,7 @@ type MockPoweroff struct {
 }
 
 func (RealPoweroff) Run(ctx context.Context) error {
-	cmd := exec.CommandContext(ctx, "systemctl", "--no-ask-password", "--ignore-inhibitors", "poweroff")
+	cmd := exec.CommandContext(ctx, systemctlPath, "--no-ask-password", "--ignore-inhibitors", "poweroff")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		message := strings.TrimSpace(string(output))
@@ -276,7 +279,7 @@ func usbDevices() ([]USB, error) {
 }
 
 func udevProperties(sysPath string) (map[string]string, error) {
-	cmd := exec.Command("udevadm", "info", "--query=property", "--path", sysPath)
+	cmd := exec.Command(udevadmPath, "info", "--query=property", "--path", sysPath)
 	out, err := cmd.Output()
 	if err != nil {
 		return nil, err
@@ -461,24 +464,42 @@ func status() error {
 	if err != nil {
 		return fmt.Errorf("configuration: %w", err)
 	}
-	m, err := find(c)
+	_, armedErr := os.Stat(armedPath)
+	_, autoArmErr := os.Stat(autoArmPath)
+	report, err := statusReport(c, find, armedErr == nil, autoArmErr == nil, watchdogServiceState())
 	if err != nil {
 		return err
 	}
-	_, armedErr := os.Stat(armedPath)
-	_, autoArmErr := os.Stat(autoArmPath)
-	fmt.Printf("Config: valid\nToken: %s\nWatchdog: %s\nPre-poweroff delay: %s\n", c.Serial, presence(len(m)), c.PrePoweroffDelay)
-	if armedErr == nil {
-		fmt.Println("Armed: yes")
-	} else {
-		fmt.Println("Armed: no")
-	}
-	if autoArmErr == nil {
-		fmt.Println("Boot auto-arm: enabled")
-	} else {
-		fmt.Println("Boot auto-arm: disabled")
-	}
+	fmt.Print(report)
 	return nil
+}
+
+func watchdogServiceState() string {
+	out, err := systemctlOutput("is-active", "usbkill.service")
+	state := strings.ToUpper(strings.TrimSpace(string(out)))
+	if state != "" {
+		return state
+	}
+	if err != nil {
+		return "UNKNOWN"
+	}
+	return "UNKNOWN"
+}
+
+func statusReport(c Config, finder deviceFinder, armed, autoArm bool, serviceState string) (string, error) {
+	m, err := finder(c)
+	if err != nil {
+		return "", err
+	}
+	armedText := "no"
+	if armed {
+		armedText = "yes"
+	}
+	autoArmText := "disabled"
+	if autoArm {
+		autoArmText = "enabled"
+	}
+	return fmt.Sprintf("Config: valid\nToken: %s\nWatchdog: %s\nService: %s\nPre-poweroff delay: %s\nArmed: %s\nBoot auto-arm: %s\n", c.Serial, presence(len(m)), serviceState, c.PrePoweroffDelay, armedText, autoArmText), nil
 }
 
 func presence(n int) string {
@@ -500,7 +521,7 @@ func daemon(test bool) error {
 		return err
 	}
 	if test {
-		if err := exec.Command("systemctl", "is-active", "--quiet", "usbkill.service").Run(); err == nil {
+		if err := systemctl("is-active", "--quiet", "usbkill.service"); err == nil {
 			return errors.New("production service is active; run sudo usbkill disarm before test mode")
 		}
 	} else if _, err = os.Stat(armedPath); err != nil {
@@ -603,7 +624,7 @@ func (m commandMonitor) wait() error {
 }
 
 func startUdevMonitor(ctx context.Context) (io.Reader, monitorHandle, error) {
-	cmd := exec.CommandContext(ctx, "udevadm", "monitor", "--udev", "--property")
+	cmd := exec.CommandContext(ctx, udevadmPath, "monitor", "--udev", "--property")
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return nil, nil, fmt.Errorf("start udev monitor: %w", err)

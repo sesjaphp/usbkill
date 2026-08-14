@@ -24,7 +24,7 @@ The `/run` state is cleared at reboot. The persistent auto-arm setting does not 
 | `sudo usbkill disarm` | Stops and disables the watchdog and removes the armed marker. | None |
 | `sudo usbkill enable-autoarm` | Persists the boot auto-arm opt-in and enables the boot unit. | Does not arm the current session. |
 | `sudo usbkill disable-autoarm` | Disables future boot auto-arming and removes the opt-in marker. | Does not disarm the current session. |
-| `sudo usbkill status` | Shows token matching state, current arming state, and boot auto-arm state. | None |
+| `sudo usbkill status` | Shows token matching state, live service state, current arming-marker state, and boot auto-arm state. | None |
 
 The internal `daemon` and `boot-autoarm` commands are executed by systemd. Do not use them as routine operator commands.
 
@@ -52,7 +52,7 @@ sudo systemctl is-active usbkill.service
 sudo journalctl -u usbkill.service -b -n 30 --no-pager
 ```
 
-A successful production arming check reports `active`. Do not remove the token unless you intend to request a real poweroff.
+A successful production arming check reports `active`. The readiness-confirmed start has a 30-second deadline; arming fails if the daemon cannot report readiness within that bound. Do not remove the token unless you intend to request a real poweroff.
 
 ## Boot auto-arm decision table
 
@@ -88,6 +88,7 @@ Disable future boot auto-arm with `sudo usbkill disable-autoarm`. To disable fut
 |---|---|---|
 | `Watchdog: ABSENT` | Reconnect the configured token, then run `sudo usbkill list`. | The configured identity is not currently visible. |
 | `Watchdog: AMBIGUOUS` | Disconnect duplicate or cloned matching devices. | Do not arm until exactly one identity matches. |
+| `Service: ACTIVE` | Run `sudo usbkill status`. | The monitor is currently running. `Armed: yes` alone records marker state, not live process health. |
 | `Armed: no` after reboot | Run `sudo usbkill status`. | Normal unless boot auto-arm is enabled and the token was present. |
 | `usbkill.service` is inactive while disarmed | `sudo systemctl status usbkill.service`. | Expected; the unit is gated by the transient armed marker. |
 | Boot auto-arm did not arm | `sudo journalctl -u usbkill-autoarm.service -b --no-pager`. | Check token presence, ambiguity, or discovery errors. |

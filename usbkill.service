@@ -11,6 +11,7 @@ OnFailure=usbkill-failure.service
 [Service]
 Type=notify
 NotifyAccess=main
+TimeoutStartSec=30s
 ExecStart=/usr/bin/usbkill daemon
 Restart=no
 KillSignal=SIGTERM

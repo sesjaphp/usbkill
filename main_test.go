@@ -132,7 +132,44 @@ func TestSaveConfigRoundTrip(t *testing.T) {
 	}
 }
 
-func TestPresenceStates(t *testing.T) {
+func TestPrivilegedHelperPathsAreAbsolute(t *testing.T) {
+	if systemctlPath != "/usr/bin/systemctl" || udevadmPath != "/usr/bin/udevadm" {
+		t.Fatalf("unexpected helper paths: systemctl=%q udevadm=%q", systemctlPath, udevadmPath)
+	}
+}
+
+func TestWatchdogServiceState(t *testing.T) {
+	oldOutput := systemctlOutput
+	defer func() { systemctlOutput = oldOutput }()
+	systemctlOutput = func(args ...string) ([]byte, error) {
+		if strings.Join(args, " ") != "is-active usbkill.service" {
+			t.Fatalf("systemctl arguments = %v", args)
+		}
+		return []byte("failed\n"), errors.New("inactive")
+	}
+	if got := watchdogServiceState(); got != "FAILED" {
+		t.Fatalf("service state = %q, want FAILED", got)
+	}
+	systemctlOutput = func(args ...string) ([]byte, error) { return nil, errors.New("dbus unavailable") }
+	if got := watchdogServiceState(); got != "UNKNOWN" {
+		t.Fatalf("service state = %q, want UNKNOWN", got)
+	}
+}
+
+func TestStatusReportIncludesServiceHealth(t *testing.T) {
+	finder := func(Config) ([]USB, error) { return []USB{{}}, nil }
+	report, err := statusReport(testConfig(), finder, true, true, "FAILED")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"Watchdog: PRESENT", "Service: FAILED", "Armed: yes", "Boot auto-arm: enabled"} {
+		if !strings.Contains(report, want) {
+			t.Fatalf("status report missing %q: %s", want, report)
+		}
+	}
+}
+
+func TestPresence(t *testing.T) {
 	if got := presence(0); got != "ABSENT" {
 		t.Fatalf("zero matches = %q", got)
 	}
@@ -502,7 +539,7 @@ func TestServicePreservesArmedStateAndUsesSingleBoundedFailurePolicy(t *testing.
 		t.Fatal(err)
 	}
 	unit := string(data)
-	for _, want := range []string{"Type=notify", "NotifyAccess=main", "Restart=no", "RuntimeDirectoryPreserve=restart", "OnFailure=usbkill-failure.service", "NoNewPrivileges=yes", "CapabilityBoundingSet=", "ProtectSystem=strict", "ProtectClock=yes", "ProtectHostname=yes", "ProtectProc=invisible", "ProcSubset=pid", "RestrictNamespaces=yes", "RestrictRealtime=yes", "MemoryDenyWriteExecute=yes"} {
+	for _, want := range []string{"Type=notify", "NotifyAccess=main", "TimeoutStartSec=30s", "Restart=no", "RuntimeDirectoryPreserve=restart", "OnFailure=usbkill-failure.service", "NoNewPrivileges=yes", "CapabilityBoundingSet=", "ProtectSystem=strict", "ProtectClock=yes", "ProtectHostname=yes", "ProtectProc=invisible", "ProcSubset=pid", "RestrictNamespaces=yes", "RestrictRealtime=yes", "MemoryDenyWriteExecute=yes"} {
 		if !strings.Contains(unit, want) {
 			t.Fatalf("service unit missing %q", want)
 		}

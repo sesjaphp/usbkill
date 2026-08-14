@@ -35,7 +35,7 @@ Run safe test mode before arming:
 sudo usbkill test
 ```
 
-After the removal test succeeds and the token is reconnected, arm the current boot session. `arm` writes the transient armed marker and enables/starts the production systemd service. It returns success only after the daemon has started the udev monitor and reported readiness to systemd:
+After the removal test succeeds and the token is reconnected, arm the current boot session. `arm` writes the transient armed marker and enables/starts the production systemd service. It returns success only after the daemon has started the udev monitor and reported readiness to systemd. That readiness must complete within 30 seconds; otherwise arming fails instead of waiting indefinitely:
 
 ```sh
 sudo usbkill arm
@@ -51,7 +51,7 @@ journalctl -u usbkill.service -f
 journalctl -u usbkill-failure.service -b --no-pager
 ```
 
-`status` reports `PRESENT`, `ABSENT`, or `AMBIGUOUS (n matches)` for the configured identity. An ambiguous state must be investigated before arming.
+`status` reports `PRESENT`, `ABSENT`, or `AMBIGUOUS (n matches)` for the configured identity, plus the live systemd state. `Armed: yes` records the intended watchdog state; `Service: ACTIVE` confirms the monitor is currently running. An ambiguous state or a non-active service must be investigated before arming.
 
 ### Optional boot auto-arm
 
@@ -120,7 +120,7 @@ The file is written atomically with mode `0600`; group- or world-writable config
 
 `usbkill` does not guarantee destruction of DRAM, CPU caches, GPU memory, firmware memory, DMA buffers, or swap. It does not protect against a root attacker, compromised kernel, modified filesystem, firmware or UEFI compromise, cold-boot attack, storage tampering, power removal, or an attacker who prevents the service from starting. LUKS does not protect plaintext that remains available in RAM while the system is running. Early-boot or initramfs protection is a separate project and is not implemented here.
 
-The production watchdog, boot auto-arm, and failure-notification units use `NoNewPrivileges=yes`, empty capability bounding sets, filesystem protections, namespace restrictions, restricted address families, and write-execute memory protection. The daemon still runs as root because it must read root-only configuration and request system-managed poweroff, but its subprocesses cannot gain additional privileges through setuid, setgid, or file-capability execution. The sandbox can verify unit syntax and static exposure but cannot exercise a real systemd poweroff transaction. Every release containing hardening changes must therefore be tested on target Arch hardware with a controlled real token-removal poweroff before the settings are considered operationally proven. A privileged attacker can still disable the service, alter the binary or configuration, or boot another operating system. Normal systemd poweroff is used instead of an abrupt hard power cut because filesystem integrity matters. The kill-switch invocation uses `--ignore-inhibitors` deliberately: active desktop or application poweroff inhibitors must not leave the machine running after the configured token is removed. This can interrupt applications that requested the inhibitor, which is expected emergency behavior.
+The production watchdog invokes fixed `/usr/bin/systemctl` and `/usr/bin/udevadm` helper paths rather than inherited `PATH` entries. The production watchdog, boot auto-arm, and failure-notification units use `NoNewPrivileges=yes`, empty capability bounding sets, filesystem protections, namespace restrictions, restricted address families, and write-execute memory protection. The daemon still runs as root because it must read root-only configuration and request system-managed poweroff, but its subprocesses cannot gain additional privileges through setuid, setgid, or file-capability execution. The sandbox can verify unit syntax and static exposure but cannot exercise a real systemd poweroff transaction. Every release containing hardening changes must therefore be tested on target Arch hardware with a controlled real token-removal poweroff before the settings are considered operationally proven. A privileged attacker can still disable the service, alter the binary or configuration, or boot another operating system. Normal systemd poweroff is used instead of an abrupt hard power cut because filesystem integrity matters. The kill-switch invocation uses `--ignore-inhibitors` deliberately: active desktop or application poweroff inhibitors must not leave the machine running after the configured token is removed. This can interrupt applications that requested the inhibitor, which is expected emergency behavior.
 
 ## Recovery
 
