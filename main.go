@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -585,6 +586,10 @@ func removalMatches(props map[string]string, c Config) bool {
 }
 
 func notifyReady(logger *slog.Logger) {
+	notifySystemd(logger, "READY=1\nSTATUS=USB token monitor active", "systemd readiness notification failed")
+}
+
+func notifySystemd(logger *slog.Logger, message, failureMessage string) {
 	socket := os.Getenv("NOTIFY_SOCKET")
 	if socket == "" {
 		return
@@ -594,13 +599,41 @@ func notifyReady(logger *slog.Logger) {
 	}
 	conn, err := net.DialUnix("unixgram", nil, &net.UnixAddr{Name: socket, Net: "unixgram"})
 	if err != nil {
-		logger.Error("systemd readiness notification failed", "error", err)
+		logger.Error(failureMessage, "error", err)
 		return
 	}
 	defer conn.Close()
-	if _, err := conn.Write([]byte("READY=1\nSTATUS=USB token monitor active")); err != nil {
-		logger.Error("systemd readiness notification failed", "error", err)
+	if _, err := conn.Write([]byte(message)); err != nil {
+		logger.Error(failureMessage, "error", err)
 	}
+}
+
+func watchdogInterval() time.Duration {
+	micros, err := strconv.ParseInt(os.Getenv("WATCHDOG_USEC"), 10, 64)
+	if err != nil || micros <= 0 || micros > int64((24*time.Hour)/time.Microsecond) {
+		return 0
+	}
+	return time.Duration(micros) * time.Microsecond / 3
+}
+
+func startWatchdogHeartbeat(ctx context.Context, logger *slog.Logger, interval time.Duration) func() {
+	if interval <= 0 {
+		return func() {}
+	}
+	heartbeatCtx, cancel := context.WithCancel(ctx)
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-heartbeatCtx.Done():
+				return
+			case <-ticker.C:
+				notifySystemd(logger, "WATCHDOG=1", "systemd watchdog notification failed")
+			}
+		}
+	}()
+	return cancel
 }
 
 type monitorHandle interface {
@@ -649,6 +682,8 @@ func monitor(ctx context.Context, c Config, logger *slog.Logger, poweroff Powero
 		return err
 	}
 	ready()
+	stopHeartbeat := startWatchdogHeartbeat(ctx, logger, watchdogInterval())
+	defer stopHeartbeat()
 	monitorErr := monitorReader(ctx, c, logger, reader, poweroff)
 	if ctx.Err() != nil {
 		return nil

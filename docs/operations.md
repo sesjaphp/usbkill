@@ -52,7 +52,7 @@ sudo systemctl is-active usbkill.service
 sudo journalctl -u usbkill.service -b -n 30 --no-pager
 ```
 
-A successful production arming check reports `active`. The readiness-confirmed start has a 30-second deadline; arming fails if the daemon cannot report readiness within that bound. Do not remove the token unless you intend to request a real poweroff.
+A successful production arming check reports `active`. The readiness-confirmed start has a 30-second deadline; arming fails if the daemon cannot report readiness within that bound. After readiness, systemd requires a watchdog heartbeat every 30 seconds and the daemon sends one every 10 seconds. If the armed daemon stops sending heartbeats, `FailureAction=poweroff` requests a normal system poweroff. This policy is intentionally destructive on a liveness failure; verify it only after saving work and completing the non-destructive removal test. Do not remove the token unless you intend to request a real poweroff.
 
 ## Boot auto-arm decision table
 

@@ -510,6 +510,48 @@ func TestVerifyStartupTokenAcceptsExactlyOneMatch(t *testing.T) {
 	}
 }
 
+func TestWatchdogInterval(t *testing.T) {
+	t.Setenv("WATCHDOG_USEC", "30000000")
+	if got := watchdogInterval(); got != 10*time.Second {
+		t.Fatalf("watchdog interval = %s, want 10s", got)
+	}
+	t.Setenv("WATCHDOG_USEC", "invalid")
+	if got := watchdogInterval(); got != 0 {
+		t.Fatalf("invalid watchdog interval = %s, want 0", got)
+	}
+	t.Setenv("WATCHDOG_USEC", "86400000001")
+	if got := watchdogInterval(); got != 0 {
+		t.Fatalf("oversized watchdog interval = %s, want 0", got)
+	}
+}
+
+func TestWatchdogHeartbeatSendsSystemdMessage(t *testing.T) {
+	socket := filepath.Join(t.TempDir(), "watchdog.sock")
+	listener, err := net.ListenUnixgram("unixgram", &net.UnixAddr{Name: socket, Net: "unixgram"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	t.Setenv("NOTIFY_SOCKET", socket)
+	ctx, cancel := context.WithCancel(context.Background())
+	stop := startWatchdogHeartbeat(ctx, slog.New(slog.NewTextHandler(io.Discard, nil)), time.Millisecond)
+	defer func() {
+		stop()
+		cancel()
+	}()
+	if err := listener.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 256)
+	n, _, err := listener.ReadFromUnix(buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(buf[:n]); got != "WATCHDOG=1" {
+		t.Fatalf("watchdog message = %q", got)
+	}
+}
+
 func TestNotifyReadySendsSystemdMessage(t *testing.T) {
 	socket := filepath.Join(t.TempDir(), "notify.sock")
 	listener, err := net.ListenUnixgram("unixgram", &net.UnixAddr{Name: socket, Net: "unixgram"})
@@ -539,7 +581,7 @@ func TestServicePreservesArmedStateAndUsesSingleBoundedFailurePolicy(t *testing.
 		t.Fatal(err)
 	}
 	unit := string(data)
-	for _, want := range []string{"Type=notify", "NotifyAccess=main", "TimeoutStartSec=30s", "Restart=no", "RuntimeDirectoryPreserve=restart", "OnFailure=usbkill-failure.service", "NoNewPrivileges=yes", "CapabilityBoundingSet=", "ProtectSystem=strict", "ProtectClock=yes", "ProtectHostname=yes", "ProtectProc=invisible", "ProcSubset=pid", "RestrictNamespaces=yes", "RestrictRealtime=yes", "MemoryDenyWriteExecute=yes"} {
+	for _, want := range []string{"Type=notify", "NotifyAccess=main", "TimeoutStartSec=30s", "WatchdogSec=30s", "FailureAction=poweroff", "Restart=no", "RuntimeDirectoryPreserve=restart", "OnFailure=usbkill-failure.service", "NoNewPrivileges=yes", "CapabilityBoundingSet=", "ProtectSystem=strict", "ProtectClock=yes", "ProtectHostname=yes", "ProtectProc=invisible", "ProcSubset=pid", "RestrictNamespaces=yes", "RestrictRealtime=yes", "MemoryDenyWriteExecute=yes"} {
 		if !strings.Contains(unit, want) {
 			t.Fatalf("service unit missing %q", want)
 		}
