@@ -19,8 +19,10 @@ import (
 )
 
 const (
-	configPath = "/etc/usbkill/config.yaml"
-	armedPath  = "/run/usbkill/armed"
+	configPath          = "/etc/usbkill/config.yaml"
+	armedPath           = "/run/usbkill/armed"
+	maxPoweroffAttempts = 3
+	poweroffRetryDelay  = time.Second
 )
 
 var lockPath = "/run/usbkill/monitor.lock"
@@ -166,8 +168,8 @@ func validateConfig(c Config) error {
 	if c.PrePoweroffDelay < 0 || c.PrePoweroffDelay > time.Minute {
 		return errors.New("pre_poweroff_delay must be 0..1m")
 	}
-	if c.ShutdownTimeout <= 0 || c.ShutdownTimeout > 5*time.Minute {
-		return errors.New("shutdown_timeout must be 1ns..5m")
+	if c.ShutdownTimeout <= 0 || c.ShutdownTimeout > 30*time.Second {
+		return errors.New("shutdown_timeout must be 1ns..30s")
 	}
 	return nil
 }
@@ -410,6 +412,10 @@ func daemon(test bool) error {
 	} else if _, err = os.Stat(armedPath); err != nil {
 		return errors.New("not armed; run sudo usbkill arm")
 	}
+	var poweroff Poweroff = RealPoweroff{}
+	if test {
+		poweroff = &MockPoweroff{}
+	}
 	lock, err := acquireMonitorLock()
 	if err != nil {
 		return err
@@ -419,17 +425,17 @@ func daemon(test bool) error {
 	if err != nil {
 		return err
 	}
-	if len(m) != 1 {
-		return errors.New("configured token absent or ambiguous at startup")
-	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
-	logger.Info("usb token detected", "test_mode", test)
-	var poweroff Poweroff = RealPoweroff{}
-	if test {
-		poweroff = &MockPoweroff{}
+	if len(m) != 1 {
+		if test {
+			return errors.New("configured token absent or ambiguous at startup")
+		}
+		logger.Error("configured token absent or ambiguous at startup; failing closed")
+		return runShutdown(ctx, c, logger, poweroff)
 	}
+	logger.Info("usb token detected", "test_mode", test)
 	return monitor(ctx, c, logger, poweroff)
 }
 
@@ -492,12 +498,26 @@ func runShutdown(ctx context.Context, c Config, logger *slog.Logger, poweroff Po
 			return nil
 		}
 	}
-	pctx, cancel := context.WithTimeout(ctx, c.ShutdownTimeout)
-	defer cancel()
-	if err := poweroff.Run(pctx); err != nil {
-		logger.Error("shutdown command failed", "error", err)
-		return err
+	var lastErr error
+	for attempt := 1; attempt <= maxPoweroffAttempts; attempt++ {
+		pctx, cancel := context.WithTimeout(ctx, c.ShutdownTimeout)
+		err := poweroff.Run(pctx)
+		cancel()
+		if err == nil {
+			logger.Info("shutdown command executed", "attempt", attempt)
+			return nil
+		}
+		lastErr = err
+		logger.Error("shutdown command failed", "attempt", attempt, "error", err)
+		if attempt < maxPoweroffAttempts {
+			timer := time.NewTimer(poweroffRetryDelay)
+			select {
+			case <-timer.C:
+			case <-ctx.Done():
+				timer.Stop()
+				return ctx.Err()
+			}
+		}
 	}
-	logger.Info("shutdown command executed")
-	return nil
+	return fmt.Errorf("shutdown failed after %d attempts: %w", maxPoweroffAttempts, lastErr)
 }

@@ -41,7 +41,7 @@ After the removal test succeeds and the token is reconnected, arm the current bo
 sudo usbkill arm
 ```
 
-Remove the configured token. Test mode must report the matching removal and suppress the real poweroff. Reconnect the token afterward. Test mode never requires the armed marker. The armed marker lives in `/run`, so it is intentionally cleared on reboot; re-arm after every boot.
+Remove the configured token. Test mode must report the matching removal and suppress the real poweroff. Reconnect the token afterward. Test mode never requires the armed marker. The armed marker lives in `/run`, so it is intentionally cleared on reboot; after every reboot, reconnect the token before starting normal work and run `sudo usbkill arm` again. If the token is absent at armed-service startup, the service attempts the fail-closed shutdown path. Reconnecting the token after a shutdown does not cancel an already-triggered shutdown; it allows the next boot to verify presence and be re-armed.
 
 Check production monitoring after arming:
 
@@ -75,9 +75,9 @@ USB token removed
     -> bounded systemctl poweroff
 ```
 
-`pre_poweroff_delay` is only a delay. It is **not** RAM sanitization and must not be interpreted as a memory wipe. The default is zero. The configuration also bounds the shutdown command timeout.
+`pre_poweroff_delay` is only a delay. It is **not** RAM sanitization and must not be interpreted as a memory wipe. The default is zero. The configuration also bounds the shutdown command timeout to 30 seconds; setup uses a 10-second default. If the shutdown command fails, usbkill logs the failure and retries up to three times with a one-second gap. An armed service fails closed at startup: if the configured token is absent or the device match is ambiguous, it enters the same bounded shutdown path instead of merely exiting.
 
-The daemon treats the first matching removal as authoritative and returns after one shutdown attempt. An exclusive runtime lock prevents test mode and the production daemon from monitoring concurrently; test mode also refuses to run while the production service is active. Reconnects do not cancel an already scheduled shutdown. Malformed, unrelated, add, change, wrong-VID, wrong-PID, wrong-serial, non-USB, and missing-serial events are ignored.
+The daemon treats the first matching removal as authoritative and runs one bounded shutdown sequence; that sequence may contain up to three controlled attempts. Reconnects do not cancel it. An exclusive runtime lock prevents test mode and the production daemon from monitoring concurrently; test mode also refuses to run while the production service is active. Reconnects do not cancel an already scheduled shutdown. Malformed, unrelated, add, change, wrong-VID, wrong-PID, wrong-serial, non-USB, and missing-serial events are ignored.
 
 ## Configuration
 
@@ -103,7 +103,7 @@ The file is written atomically with mode `0600`; group- or world-writable config
 
 `usbkill` does not guarantee destruction of DRAM, CPU caches, GPU memory, firmware memory, DMA buffers, or swap. It does not protect against a root attacker, compromised kernel, modified filesystem, firmware or UEFI compromise, cold-boot attack, storage tampering, power removal, or an attacker who prevents the service from starting. LUKS does not protect plaintext that remains available in RAM while the system is running. Early-boot or initramfs protection is a separate project and is not implemented here.
 
-A privileged attacker can disable the service, alter the binary or configuration, or boot another operating system. Normal systemd poweroff is used instead of an abrupt hard power cut because filesystem integrity matters. The kill-switch invocation uses `--ignore-inhibitors` deliberately: active desktop or application poweroff inhibitors must not leave the machine running after the configured token is removed. This can interrupt applications that requested the inhibitor, which is expected emergency behavior.
+`NoNewPrivileges` is intentionally not enabled in the unit yet: the sandbox can verify unit syntax but cannot exercise an actual systemd poweroff transaction, and this option must be tested on the target Arch system before adoption. A privileged attacker can disable the service, alter the binary or configuration, or boot another operating system. Normal systemd poweroff is used instead of an abrupt hard power cut because filesystem integrity matters. The kill-switch invocation uses `--ignore-inhibitors` deliberately: active desktop or application poweroff inhibitors must not leave the machine running after the configured token is removed. This can interrupt applications that requested the inhibitor, which is expected emergency behavior.
 
 ## Recovery
 

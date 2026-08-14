@@ -27,6 +27,11 @@ func TestConfigValidation(t *testing.T) {
 	if err := validateConfig(valid); err != nil {
 		t.Fatal(err)
 	}
+	tooLong := valid
+	tooLong.ShutdownTimeout = 31 * time.Second
+	if err := validateConfig(tooLong); err == nil {
+		t.Fatal("expected 30-second maximum rejection")
+	}
 	cases := []Config{
 		{VendorID: "204", ProductID: "6025", Serial: "abc", ShutdownTimeout: time.Second},
 		{VendorID: "0204", ProductID: "6025", Serial: "", ShutdownTimeout: time.Second},
@@ -147,6 +152,9 @@ func TestShutdownFailureReturned(t *testing.T) {
 	if err := runShutdown(context.Background(), testConfig(), slog.Default(), mock); err == nil {
 		t.Fatal("expected failure")
 	}
+	if mock.Calls != maxPoweroffAttempts {
+		t.Fatalf("calls = %d, want %d", mock.Calls, maxPoweroffAttempts)
+	}
 }
 
 func TestShutdownTimeoutIsBounded(t *testing.T) {
@@ -157,7 +165,7 @@ func TestShutdownTimeoutIsBounded(t *testing.T) {
 	if err := runShutdown(context.Background(), c, slog.Default(), mock); err == nil {
 		t.Fatal("expected timeout error")
 	}
-	if time.Since(start) > time.Second {
+	if time.Since(start) > 5*time.Second {
 		t.Fatal("shutdown exceeded practical bound")
 	}
 }
