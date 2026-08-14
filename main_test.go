@@ -138,10 +138,35 @@ func TestPrivilegedHelperPathsAreAbsolute(t *testing.T) {
 	}
 }
 
+func TestUdevPropertiesUsesBoundedContext(t *testing.T) {
+	oldOutput := udevadmOutput
+	defer func() { udevadmOutput = oldOutput }()
+	udevadmOutput = func(ctx context.Context, args ...string) ([]byte, error) {
+		deadline, ok := ctx.Deadline()
+		if !ok || time.Until(deadline) <= 0 || time.Until(deadline) > udevadmInfoTimeout {
+			t.Fatal("udevadm property query does not have the expected deadline")
+		}
+		if strings.Join(args, " ") != "info --query=property --path /sys/class/block/sdb" {
+			t.Fatalf("udevadm arguments = %v", args)
+		}
+		return []byte("ID_BUS=usb\nID_SERIAL_SHORT=abc\n"), nil
+	}
+	props, err := udevProperties("/sys/class/block/sdb")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if props["ID_BUS"] != "usb" || props["ID_SERIAL_SHORT"] != "abc" {
+		t.Fatalf("properties = %#v", props)
+	}
+}
+
 func TestWatchdogServiceState(t *testing.T) {
 	oldOutput := systemctlOutput
 	defer func() { systemctlOutput = oldOutput }()
-	systemctlOutput = func(args ...string) ([]byte, error) {
+	systemctlOutput = func(ctx context.Context, args ...string) ([]byte, error) {
+		if _, ok := ctx.Deadline(); !ok {
+			t.Fatal("systemctl status call has no deadline")
+		}
 		if strings.Join(args, " ") != "is-active usbkill.service" {
 			t.Fatalf("systemctl arguments = %v", args)
 		}
@@ -150,7 +175,7 @@ func TestWatchdogServiceState(t *testing.T) {
 	if got := watchdogServiceState(); got != "FAILED" {
 		t.Fatalf("service state = %q, want FAILED", got)
 	}
-	systemctlOutput = func(args ...string) ([]byte, error) { return nil, errors.New("dbus unavailable") }
+	systemctlOutput = func(_ context.Context, args ...string) ([]byte, error) { return nil, errors.New("dbus unavailable") }
 	if got := watchdogServiceState(); got != "UNKNOWN" {
 		t.Fatalf("service state = %q, want UNKNOWN", got)
 	}
@@ -359,7 +384,10 @@ func TestBootAutoarmArmsOnlyForExactlyOneToken(t *testing.T) {
 		systemctlRun = oldSystemctlRun
 	}()
 	var calls [][]string
-	systemctlRun = func(args ...string) error {
+	systemctlRun = func(ctx context.Context, args ...string) error {
+		if _, ok := ctx.Deadline(); !ok {
+			t.Fatal("systemctl command has no deadline")
+		}
 		calls = append(calls, append([]string(nil), args...))
 		return nil
 	}
@@ -386,7 +414,7 @@ func TestBootAutoarmLeavesDisarmedForUnsafeTokenState(t *testing.T) {
 		armedPath = oldArmedPath
 		systemctlRun = oldSystemctlRun
 	}()
-	systemctlRun = func(args ...string) error {
+	systemctlRun = func(_ context.Context, args ...string) error {
 		t.Fatalf("unexpected systemctl call: %v", args)
 		return nil
 	}
@@ -411,7 +439,7 @@ func TestBootAutoarmDiscoveryFailureDoesNotArm(t *testing.T) {
 		armedPath = oldArmedPath
 		systemctlRun = oldSystemctlRun
 	}()
-	systemctlRun = func(args ...string) error {
+	systemctlRun = func(_ context.Context, args ...string) error {
 		t.Fatalf("unexpected systemctl call: %v", args)
 		return nil
 	}
@@ -438,7 +466,10 @@ func TestAutoarmTogglePersistsOptInAndControlsUnit(t *testing.T) {
 		t.Fatal(err)
 	}
 	var calls [][]string
-	systemctlRun = func(args ...string) error {
+	systemctlRun = func(ctx context.Context, args ...string) error {
+		if _, ok := ctx.Deadline(); !ok {
+			t.Fatal("systemctl command has no deadline")
+		}
 		calls = append(calls, append([]string(nil), args...))
 		return nil
 	}
@@ -693,7 +724,7 @@ func TestAutoarmUnitIsOptInAndWatchdogIsArmedGated(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"ConditionPathExists=/etc/usbkill/auto-arm", "After=systemd-udev-settle.service", "ExecStart=/usr/bin/usbkill boot-autoarm", "NoNewPrivileges=yes", "CapabilityBoundingSet=", "RestrictNamespaces=yes", "MemoryDenyWriteExecute=yes"} {
+	for _, want := range []string{"ConditionPathExists=/etc/usbkill/auto-arm", "After=systemd-udev-settle.service", "Type=oneshot", "TimeoutStartSec=30s", "ExecStart=/usr/bin/usbkill boot-autoarm", "NoNewPrivileges=yes", "CapabilityBoundingSet=", "RestrictNamespaces=yes", "MemoryDenyWriteExecute=yes"} {
 		if !strings.Contains(string(autoarm), want) {
 			t.Fatalf("auto-arm unit missing %q", want)
 		}

@@ -23,6 +23,8 @@ import (
 const (
 	maxPoweroffAttempts = 3
 	poweroffRetryDelay  = time.Second
+	systemctlTimeout    = 45 * time.Second
+	udevadmInfoTimeout  = 5 * time.Second
 	systemctlPath       = "/usr/bin/systemctl"
 	udevadmPath         = "/usr/bin/udevadm"
 )
@@ -33,9 +35,16 @@ var (
 	armedPath          = "/run/usbkill/armed"
 	autoArmPath        = "/etc/usbkill/auto-arm"
 	lockPath           = "/run/usbkill/monitor.lock"
-	systemctlRun       = func(args ...string) error { return exec.Command(systemctlPath, args...).Run() }
-	systemctlOutput    = func(args ...string) ([]byte, error) { return exec.Command(systemctlPath, args...).Output() }
-	startMonitor       = startUdevMonitor
+	systemctlRun       = func(ctx context.Context, args ...string) error {
+		return exec.CommandContext(ctx, systemctlPath, args...).Run()
+	}
+	systemctlOutput = func(ctx context.Context, args ...string) ([]byte, error) {
+		return exec.CommandContext(ctx, systemctlPath, args...).Output()
+	}
+	udevadmOutput = func(ctx context.Context, args ...string) ([]byte, error) {
+		return exec.CommandContext(ctx, udevadmPath, args...).Output()
+	}
+	startMonitor = startUdevMonitor
 )
 
 type Config struct {
@@ -280,9 +289,13 @@ func usbDevices() ([]USB, error) {
 }
 
 func udevProperties(sysPath string) (map[string]string, error) {
-	cmd := exec.Command(udevadmPath, "info", "--query=property", "--path", sysPath)
-	out, err := cmd.Output()
+	ctx, cancel := context.WithTimeout(context.Background(), udevadmInfoTimeout)
+	defer cancel()
+	out, err := udevadmOutput(ctx, "info", "--query=property", "--path", sysPath)
 	if err != nil {
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("udevadm property query timed out after %s: %w", udevadmInfoTimeout, ctx.Err())
+		}
 		return nil, err
 	}
 	props := make(map[string]string)
@@ -442,7 +455,13 @@ func disarm() error {
 }
 
 func systemctl(args ...string) error {
-	return systemctlRun(args...)
+	ctx, cancel := context.WithTimeout(context.Background(), systemctlTimeout)
+	defer cancel()
+	err := systemctlRun(ctx, args...)
+	if ctx.Err() != nil {
+		return fmt.Errorf("systemctl command timed out after %s: %w", systemctlTimeout, ctx.Err())
+	}
+	return err
 }
 
 func acquireMonitorLock() (*os.File, error) {
@@ -476,7 +495,9 @@ func status() error {
 }
 
 func watchdogServiceState() string {
-	out, err := systemctlOutput("is-active", "usbkill.service")
+	ctx, cancel := context.WithTimeout(context.Background(), systemctlTimeout)
+	defer cancel()
+	out, err := systemctlOutput(ctx, "is-active", "usbkill.service")
 	state := strings.ToUpper(strings.TrimSpace(string(out)))
 	if state != "" {
 		return state

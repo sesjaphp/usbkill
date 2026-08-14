@@ -51,7 +51,7 @@ journalctl -u usbkill.service -f
 journalctl -u usbkill-failure.service -b --no-pager
 ```
 
-`status` reports `PRESENT`, `ABSENT`, or `AMBIGUOUS (n matches)` for the configured identity, plus the live systemd state. `Armed: yes` records the intended watchdog state; `Service: ACTIVE` confirms the monitor is currently running. An ambiguous state or a non-active service must be investigated before arming.
+`status` reports `PRESENT`, `ABSENT`, or `AMBIGUOUS (n matches)` for the configured identity, plus the live systemd state. `Armed: yes` records the intended watchdog state; `Service: ACTIVE` confirms the monitor is currently running. An ambiguous state or a non-active service must be investigated before arming. Direct `systemctl` control and status calls have a 45-second deadline. Each `udevadm info` identity lookup has a 5-second deadline, so `list`, `setup`, `arm`, `status`, and boot auto-arm cannot wait forever on a stuck helper.
 
 ### Optional boot auto-arm
 
@@ -61,7 +61,7 @@ After you have passed the non-destructive test and deliberately want the watchdo
 sudo usbkill enable-autoarm
 ```
 
-At each boot, the one-shot auto-arm unit waits for udev settlement and arms only if exactly one configured token is present. If the token is absent, ambiguous, or discovery fails, it leaves the watchdog disarmed and records the reason; it does not power off the machine. Check the setting with `sudo usbkill status`. Disable future boot auto-arming without disarming the current session using:
+At each boot, the one-shot auto-arm unit waits for udev settlement and arms only if exactly one configured token is present. The unit has a 30-second start deadline. If the token is absent, ambiguous, discovery fails, or the unit times out, it leaves the watchdog disarmed and records the reason; it does not power off the machine. Check the setting with `sudo usbkill status`. Disable future boot auto-arming without disarming the current session using:
 
 ```sh
 sudo usbkill disable-autoarm
