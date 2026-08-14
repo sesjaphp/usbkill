@@ -122,3 +122,33 @@ rm -f /mnt/etc/usbkill/config.yaml
 ```
 
 Do not re-enable the watchdog until the token and configuration have completed a non-destructive test.
+
+## Service hardening verification
+
+The watchdog and boot auto-arm units use `NoNewPrivileges=yes`, empty capability bounding sets, strict filesystem controls, namespace restrictions, restricted socket families, and write-execute memory protection. Static validation cannot prove that these settings preserve a real systemd poweroff transaction on every Arch installation.
+
+After installing a hardening update, test in this order. Keep the configured token connected until the final controlled removal check.
+
+```sh
+sudo usbkill disarm
+sudo systemctl daemon-reload
+sudo systemctl show usbkill.service -p NoNewPrivileges -p CapabilityBoundingSet -p ProtectSystem -p RestrictNamespaces -p MemoryDenyWriteExecute
+sudo usbkill test
+```
+
+The test-mode removal must still log `TEST MODE: poweroff suppressed`. Reconnect the token, save all work, arm the production service, and verify it has reached readiness:
+
+```sh
+sudo usbkill arm
+sudo systemctl is-active usbkill.service
+sudo journalctl -u usbkill.service -b -n 30 --no-pager
+```
+
+The final validation is intentionally destructive: remove the token only when a real poweroff is safe. After rebooting, inspect the previous boot's journal for a successful shutdown request or an explicit failure:
+
+```sh
+sudo journalctl -u usbkill.service -b -1 --no-pager
+sudo journalctl -u usbkill-failure.service -b -1 --no-pager
+```
+
+If the service fails to start, remains inactive, or the controlled removal does not request poweroff, immediately disarm it, disable boot auto-arm if enabled, and restore the last known-good package revision before further investigation.

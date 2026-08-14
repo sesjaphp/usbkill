@@ -480,7 +480,7 @@ func TestServicePreservesArmedStateAndUsesSingleBoundedFailurePolicy(t *testing.
 		t.Fatal(err)
 	}
 	unit := string(data)
-	for _, want := range []string{"Type=notify", "NotifyAccess=main", "Restart=no", "RuntimeDirectoryPreserve=restart", "OnFailure=usbkill-failure.service"} {
+	for _, want := range []string{"Type=notify", "NotifyAccess=main", "Restart=no", "RuntimeDirectoryPreserve=restart", "OnFailure=usbkill-failure.service", "NoNewPrivileges=yes", "CapabilityBoundingSet=", "ProtectSystem=strict", "ProtectClock=yes", "ProtectHostname=yes", "ProtectProc=invisible", "ProcSubset=pid", "RestrictNamespaces=yes", "RestrictRealtime=yes", "MemoryDenyWriteExecute=yes"} {
 		if !strings.Contains(unit, want) {
 			t.Fatalf("service unit missing %q", want)
 		}
@@ -536,7 +536,7 @@ func TestAutoarmUnitIsOptInAndWatchdogIsArmedGated(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"ConditionPathExists=/etc/usbkill/auto-arm", "After=systemd-udev-settle.service", "ExecStart=/usr/bin/usbkill boot-autoarm"} {
+	for _, want := range []string{"ConditionPathExists=/etc/usbkill/auto-arm", "After=systemd-udev-settle.service", "ExecStart=/usr/bin/usbkill boot-autoarm", "NoNewPrivileges=yes", "CapabilityBoundingSet=", "RestrictNamespaces=yes", "MemoryDenyWriteExecute=yes"} {
 		if !strings.Contains(string(autoarm), want) {
 			t.Fatalf("auto-arm unit missing %q", want)
 		}
@@ -547,6 +547,19 @@ func TestAutoarmUnitIsOptInAndWatchdogIsArmedGated(t *testing.T) {
 	}
 	if !strings.Contains(string(watchdog), "ConditionPathExists=/run/usbkill/armed") {
 		t.Fatal("watchdog unit is not gated by the armed marker")
+	}
+}
+
+func TestFailureUnitUsesReducedPrivileges(t *testing.T) {
+	data, err := os.ReadFile("usbkill-failure.service")
+	if err != nil {
+		t.Fatal(err)
+	}
+	unit := string(data)
+	for _, want := range []string{"NoNewPrivileges=yes", "CapabilityBoundingSet=", "ProtectSystem=strict", "RestrictNamespaces=yes", "MemoryDenyWriteExecute=yes", "RestrictAddressFamilies=AF_UNIX"} {
+		if !strings.Contains(unit, want) {
+			t.Fatalf("failure unit missing %q", want)
+		}
 	}
 }
 
