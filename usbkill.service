@@ -14,7 +14,6 @@ RestartSec=2s
 KillSignal=SIGTERM
 RuntimeDirectory=usbkill
 RuntimeDirectoryMode=0750
-NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectHome=yes
 ProtectSystem=full

@@ -49,7 +49,16 @@ type MockPoweroff struct {
 }
 
 func (RealPoweroff) Run(ctx context.Context) error {
-	return exec.CommandContext(ctx, "systemctl", "poweroff").Run()
+	cmd := exec.CommandContext(ctx, "systemctl", "--no-ask-password", "poweroff")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		message := strings.TrimSpace(string(output))
+		if message != "" {
+			return fmt.Errorf("%w: %s", err, message)
+		}
+		return err
+	}
+	return nil
 }
 
 func (m *MockPoweroff) Run(context.Context) error {
