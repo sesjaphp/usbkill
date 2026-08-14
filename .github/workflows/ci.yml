@@ -44,7 +44,12 @@ jobs:
           grep -q '^pkgbase = usbkill$' .SRCINFO
 
       - name: Validate systemd units
-        run: systemd-analyze verify usbkill.service usbkill-failure.service usbkill-autoarm.service
+        run: |
+          mkdir -p .ci-units
+          sed "s|/usr/bin/usbkill|$PWD/usbkill|g" usbkill.service > .ci-units/usbkill.service
+          sed "s|/usr/bin/usbkill|$PWD/usbkill|g" usbkill-autoarm.service > .ci-units/usbkill-autoarm.service
+          cp usbkill-failure.service .ci-units/usbkill-failure.service
+          systemd-analyze verify .ci-units/usbkill.service .ci-units/usbkill-failure.service .ci-units/usbkill-autoarm.service
 
       - name: Check whitespace
         run: git diff --check
