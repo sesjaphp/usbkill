@@ -23,8 +23,10 @@ import (
 const (
 	maxPoweroffAttempts = 3
 	poweroffRetryDelay  = time.Second
+	bootAutoarmTimeout  = 25 * time.Second
 	systemctlTimeout    = 45 * time.Second
 	udevadmInfoTimeout  = 5 * time.Second
+	maxUdevRecordSize   = 256 * 1024
 	systemctlPath       = "/usr/bin/systemctl"
 	udevadmPath         = "/usr/bin/udevadm"
 )
@@ -134,15 +136,121 @@ func usage() {
 	fmt.Println("Usage: usbkill {list|setup|status|test|arm|disarm|enable-autoarm|disable-autoarm|daemon}")
 }
 
+func trustedRegularFile(path string) (os.FileInfo, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s is not a regular file", path)
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || stat.Uid != uint32(os.Geteuid()) {
+		return nil, fmt.Errorf("%s is not owned by the executing user", path)
+	}
+	if info.Mode().Perm()&0022 != 0 {
+		return nil, fmt.Errorf("%s is writable by group or other users", path)
+	}
+	return info, nil
+}
+
+func trustedDirectory(path string) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("%s is not a directory", path)
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || stat.Uid != uint32(os.Geteuid()) {
+		return fmt.Errorf("%s is not owned by the executing user", path)
+	}
+	if info.Mode().Perm()&0022 != 0 {
+		return fmt.Errorf("%s is writable by group or other users", path)
+	}
+	return nil
+}
+
+func trustedMarkerExists(path string) (bool, error) {
+	_, err := trustedRegularFile(path)
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func writeTrustedFile(path string, data []byte) error {
+	if err := trustedDirectory(filepath.Dir(path)); err != nil {
+		return err
+	}
+	if _, err := os.Lstat(path); err != nil && !os.IsNotExist(err) {
+		return err
+	} else if err == nil {
+		if _, err := trustedRegularFile(path); err != nil {
+			return err
+		}
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, 0600)
+	if err != nil {
+		return err
+	}
+	if _, err = f.Write(data); err == nil {
+		err = f.Sync()
+	}
+	if closeErr := f.Close(); err == nil {
+		err = closeErr
+	}
+	return err
+}
+
+func syncDirectory(path string) error {
+	dir, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	return dir.Sync()
+}
+
+func openTrustedFile(path string) (*os.File, error) {
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, err
+	}
+	info, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		f.Close()
+		return nil, fmt.Errorf("%s is not a regular file", path)
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || stat.Uid != uint32(os.Geteuid()) {
+		f.Close()
+		return nil, fmt.Errorf("%s is not owned by the executing user", path)
+	}
+	if info.Mode().Perm()&0022 != 0 {
+		f.Close()
+		return nil, fmt.Errorf("%s is writable by group or other users", path)
+	}
+	return f, nil
+}
+
 func loadConfig() (Config, error) {
-	info, err := os.Stat(configPath)
+	f, err := openTrustedFile(configPath)
 	if err != nil {
 		return Config{}, err
 	}
-	if info.Mode().Perm()&0022 != 0 {
-		return Config{}, errors.New("configuration is writable by group or other users")
+	b, err := io.ReadAll(f)
+	if closeErr := f.Close(); err == nil {
+		err = closeErr
 	}
-	b, err := os.ReadFile(configPath)
 	if err != nil {
 		return Config{}, err
 	}
@@ -206,14 +314,25 @@ func saveConfig(c Config) error {
 	if err := validateConfig(c); err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(configPath), 0750); err != nil {
+	dir := filepath.Dir(configPath)
+	if err := os.MkdirAll(dir, 0750); err != nil {
 		return err
 	}
-	if err := os.Chmod(filepath.Dir(configPath), 0750); err != nil {
+	if err := trustedDirectory(dir); err != nil {
 		return err
+	}
+	if err := os.Chmod(dir, 0750); err != nil {
+		return err
+	}
+	if _, err := os.Lstat(configPath); err != nil && !os.IsNotExist(err) {
+		return err
+	} else if err == nil {
+		if _, err := trustedRegularFile(configPath); err != nil {
+			return err
+		}
 	}
 	data := fmt.Sprintf("vendor_id: %q\nproduct_id: %q\nserial: %q\npre_poweroff_delay: %s\nshutdown_timeout: %s\n", c.VendorID, c.ProductID, normalizeSerial(c.Serial), c.PrePoweroffDelay, c.ShutdownTimeout)
-	tmp, err := os.CreateTemp(filepath.Dir(configPath), ".config-*")
+	tmp, err := os.CreateTemp(dir, ".config-*")
 	if err != nil {
 		return err
 	}
@@ -222,13 +341,19 @@ func saveConfig(c Config) error {
 	if err = tmp.Chmod(0600); err == nil {
 		_, err = tmp.WriteString(data)
 	}
+	if err == nil {
+		err = tmp.Sync()
+	}
 	if closeErr := tmp.Close(); err == nil {
 		err = closeErr
 	}
 	if err != nil {
 		return err
 	}
-	return os.Rename(name, configPath)
+	if err := os.Rename(name, configPath); err != nil {
+		return err
+	}
+	return syncDirectory(dir)
 }
 
 func normalizeSerial(s string) string {
@@ -255,12 +380,19 @@ func listUSB() error {
 }
 
 func usbDevices() ([]USB, error) {
+	return usbDevicesContext(context.Background())
+}
+
+func usbDevicesContext(ctx context.Context) ([]USB, error) {
 	entries, err := os.ReadDir("/sys/class/block")
 	if err != nil {
 		return nil, err
 	}
 	var out []USB
 	for _, e := range entries {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		n := e.Name()
 		base := filepath.Join("/sys/class/block", n)
 		if _, err := os.Stat(filepath.Join(base, "partition")); err == nil {
@@ -269,8 +401,14 @@ func usbDevices() ([]USB, error) {
 		if strings.HasPrefix(n, "loop") || strings.HasPrefix(n, "ram") || strings.HasPrefix(n, "dm-") {
 			continue
 		}
-		props, err := udevProperties(base)
-		if err != nil || props["ID_BUS"] != "usb" || props["ID_TYPE"] == "partition" {
+		props, err := udevPropertiesContext(ctx, base)
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			continue
+		}
+		if props["ID_BUS"] != "usb" || props["ID_TYPE"] == "partition" {
 			continue
 		}
 		x := USB{Node: "/dev/" + n, SysPath: base, VendorID: strings.ToUpper(props["ID_VENDOR_ID"]), ProductID: strings.ToUpper(props["ID_MODEL_ID"]), Serial: normalizeSerial(props["ID_SERIAL_SHORT"]), Model: props["ID_MODEL"]}
@@ -289,12 +427,16 @@ func usbDevices() ([]USB, error) {
 }
 
 func udevProperties(sysPath string) (map[string]string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), udevadmInfoTimeout)
+	return udevPropertiesContext(context.Background(), sysPath)
+}
+
+func udevPropertiesContext(parent context.Context, sysPath string) (map[string]string, error) {
+	ctx, cancel := context.WithTimeout(parent, udevadmInfoTimeout)
 	defer cancel()
 	out, err := udevadmOutput(ctx, "info", "--query=property", "--path", sysPath)
 	if err != nil {
 		if ctx.Err() != nil {
-			return nil, fmt.Errorf("udevadm property query timed out after %s: %w", udevadmInfoTimeout, ctx.Err())
+			return nil, fmt.Errorf("udevadm property query timed out: %w", ctx.Err())
 		}
 		return nil, err
 	}
@@ -316,7 +458,11 @@ func matches(x USB, c Config) bool {
 }
 
 func find(c Config) ([]USB, error) {
-	xs, err := usbDevices()
+	return findContext(context.Background(), c)
+}
+
+func findContext(ctx context.Context, c Config) ([]USB, error) {
+	xs, err := usbDevicesContext(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -375,13 +521,21 @@ func arm() error {
 }
 
 func completeArm() error {
-	if err := os.MkdirAll(filepath.Dir(armedPath), 0750); err != nil {
+	return completeArmContext(context.Background())
+}
+
+func completeArmContext(ctx context.Context) error {
+	dir := filepath.Dir(armedPath)
+	if err := os.MkdirAll(dir, 0750); err != nil {
 		return err
 	}
-	if err := os.WriteFile(armedPath, []byte("armed\n"), 0600); err != nil {
+	if err := trustedDirectory(dir); err != nil {
 		return err
 	}
-	if err := systemctl("enable", "--now", "usbkill.service"); err != nil {
+	if err := writeTrustedFile(armedPath, []byte("armed\n")); err != nil {
+		return err
+	}
+	if err := systemctlContext(ctx, "enable", "--now", "usbkill.service"); err != nil {
 		_ = os.Remove(armedPath)
 		return fmt.Errorf("armed marker written but service could not start: %w", err)
 	}
@@ -397,11 +551,19 @@ func tokenReady(c Config, finder deviceFinder) (bool, error) {
 	return len(m) == 1, nil
 }
 
+func tokenReadyContext(ctx context.Context, c Config, finder contextDeviceFinder) (bool, error) {
+	m, err := finder(ctx, c)
+	if err != nil {
+		return false, err
+	}
+	return len(m) == 1, nil
+}
+
 func enableAutoarm() error {
 	if _, err := loadConfig(); err != nil {
 		return err
 	}
-	if err := os.WriteFile(autoArmPath, []byte("enabled\n"), 0600); err != nil {
+	if err := writeTrustedFile(autoArmPath, []byte("enabled\n")); err != nil {
 		return err
 	}
 	if err := systemctl("enable", "usbkill-autoarm.service"); err != nil {
@@ -428,11 +590,19 @@ func bootAutoarm() error {
 	if err != nil {
 		return err
 	}
-	return bootAutoarmConfig(c, find)
+	ctx, cancel := context.WithTimeout(context.Background(), bootAutoarmTimeout)
+	defer cancel()
+	return bootAutoarmContext(ctx, c, findContext)
 }
 
 func bootAutoarmConfig(c Config, finder deviceFinder) error {
-	ready, err := tokenReady(c, finder)
+	return bootAutoarmContext(context.Background(), c, func(context.Context, Config) ([]USB, error) {
+		return finder(c)
+	})
+}
+
+func bootAutoarmContext(ctx context.Context, c Config, finder contextDeviceFinder) error {
+	ready, err := tokenReadyContext(ctx, c, finder)
 	if err != nil {
 		return fmt.Errorf("boot auto-arm token discovery failed: %w", err)
 	}
@@ -440,7 +610,7 @@ func bootAutoarmConfig(c Config, finder deviceFinder) error {
 		fmt.Println("Boot auto-arm left watchdog disarmed: token absent or ambiguous.")
 		return nil
 	}
-	return completeArm()
+	return completeArmContext(ctx)
 }
 
 func disarm() error {
@@ -455,20 +625,35 @@ func disarm() error {
 }
 
 func systemctl(args ...string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), systemctlTimeout)
+	return systemctlContext(context.Background(), args...)
+}
+
+func systemctlContext(parent context.Context, args ...string) error {
+	ctx, cancel := context.WithTimeout(parent, systemctlTimeout)
 	defer cancel()
 	err := systemctlRun(ctx, args...)
 	if ctx.Err() != nil {
-		return fmt.Errorf("systemctl command timed out after %s: %w", systemctlTimeout, ctx.Err())
+		return fmt.Errorf("systemctl command timed out: %w", ctx.Err())
 	}
 	return err
 }
 
 func acquireMonitorLock() (*os.File, error) {
-	if err := os.MkdirAll(filepath.Dir(lockPath), 0750); err != nil {
+	dir := filepath.Dir(lockPath)
+	if err := os.MkdirAll(dir, 0750); err != nil {
 		return nil, err
 	}
-	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0600)
+	if err := trustedDirectory(dir); err != nil {
+		return nil, err
+	}
+	if _, err := os.Lstat(lockPath); err != nil && !os.IsNotExist(err) {
+		return nil, err
+	} else if err == nil {
+		if _, err := trustedRegularFile(lockPath); err != nil {
+			return nil, err
+		}
+	}
+	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW, 0600)
 	if err != nil {
 		return nil, err
 	}
@@ -484,9 +669,15 @@ func status() error {
 	if err != nil {
 		return fmt.Errorf("configuration: %w", err)
 	}
-	_, armedErr := os.Stat(armedPath)
-	_, autoArmErr := os.Stat(autoArmPath)
-	report, err := statusReport(c, find, armedErr == nil, autoArmErr == nil, watchdogServiceState())
+	armed, err := trustedMarkerExists(armedPath)
+	if err != nil {
+		return fmt.Errorf("armed marker: %w", err)
+	}
+	autoArm, err := trustedMarkerExists(autoArmPath)
+	if err != nil {
+		return fmt.Errorf("boot auto-arm marker: %w", err)
+	}
+	report, err := statusReport(c, find, armed, autoArm, watchdogServiceState())
 	if err != nil {
 		return err
 	}
@@ -536,6 +727,7 @@ func presence(n int) string {
 }
 
 type deviceFinder func(Config) ([]USB, error)
+type contextDeviceFinder func(context.Context, Config) ([]USB, error)
 
 func daemon(test bool) error {
 	c, err := loadConfig()
@@ -546,8 +738,14 @@ func daemon(test bool) error {
 		if err := systemctl("is-active", "--quiet", "usbkill.service"); err == nil {
 			return errors.New("production service is active; run sudo usbkill disarm before test mode")
 		}
-	} else if _, err = os.Stat(armedPath); err != nil {
-		return errors.New("not armed; run sudo usbkill arm")
+	} else {
+		armed, markerErr := trustedMarkerExists(armedPath)
+		if markerErr != nil {
+			return fmt.Errorf("armed marker: %w", markerErr)
+		}
+		if !armed {
+			return errors.New("not armed; run sudo usbkill arm")
+		}
 	}
 	var poweroff Poweroff = RealPoweroff{}
 	if test {
@@ -727,6 +925,7 @@ func monitor(ctx context.Context, c Config, logger *slog.Logger, poweroff Powero
 
 func monitorReader(ctx context.Context, c Config, logger *slog.Logger, reader io.Reader, poweroff Poweroff) error {
 	scanner := bufio.NewScanner(reader)
+	scanner.Buffer(make([]byte, 4096), maxUdevRecordSize)
 	props := make(map[string]string)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())

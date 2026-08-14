@@ -132,6 +132,45 @@ func TestSaveConfigRoundTrip(t *testing.T) {
 	}
 }
 
+func TestConfigAndMarkerRejectSymlinks(t *testing.T) {
+	oldConfigPath := configPath
+	defer func() { configPath = oldConfigPath }()
+	temp := t.TempDir()
+	configPath = filepath.Join(temp, "config.yaml")
+	target := filepath.Join(temp, "target")
+	if err := os.WriteFile(target, []byte("target\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, configPath); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadConfig(); err == nil {
+		t.Fatal("expected symlinked configuration rejection")
+	}
+	if err := saveConfig(testConfig()); err == nil {
+		t.Fatal("expected save over symlink rejection")
+	}
+	marker := filepath.Join(temp, "marker")
+	if err := os.Symlink(target, marker); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := trustedMarkerExists(marker); err == nil {
+		t.Fatal("expected symlinked marker rejection")
+	}
+	parentTarget := filepath.Join(temp, "parent-target")
+	if err := os.Mkdir(parentTarget, 0750); err != nil {
+		t.Fatal(err)
+	}
+	parentLink := filepath.Join(temp, "parent-link")
+	if err := os.Symlink(parentTarget, parentLink); err != nil {
+		t.Fatal(err)
+	}
+	configPath = filepath.Join(parentLink, "config.yaml")
+	if err := saveConfig(testConfig()); err == nil {
+		t.Fatal("expected symlinked configuration directory rejection")
+	}
+}
+
 func TestPrivilegedHelperPathsAreAbsolute(t *testing.T) {
 	if systemctlPath != "/usr/bin/systemctl" || udevadmPath != "/usr/bin/udevadm" {
 		t.Fatalf("unexpected helper paths: systemctl=%q udevadm=%q", systemctlPath, udevadmPath)
@@ -218,8 +257,8 @@ func TestPackageDeclaresFailureAlertDependencyAndValidation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(makeData), "systemd-analyze verify usbkill.service usbkill-failure.service") {
-		t.Fatal("Makefile does not validate both systemd units")
+	if !strings.Contains(string(makeData), "systemd-analyze verify usbkill.service usbkill-failure.service usbkill-autoarm.service") {
+		t.Fatal("Makefile does not validate all systemd units")
 	}
 }
 
@@ -363,6 +402,17 @@ func TestMonitorReaderEOFFailsClosed(t *testing.T) {
 	}
 }
 
+func TestOversizedMonitorRecordFailsClosed(t *testing.T) {
+	poweroff := &successfulPoweroff{}
+	input := strings.Repeat("x", maxUdevRecordSize+1)
+	if err := monitorReader(context.Background(), testConfig(), slog.New(slog.NewTextHandler(io.Discard, nil)), strings.NewReader(input), poweroff); !errors.Is(err, errShutdownHandled) {
+		t.Fatalf("monitor error = %v, want handled shutdown", err)
+	}
+	if poweroff.Calls != 1 {
+		t.Fatalf("poweroff calls = %d, want 1", poweroff.Calls)
+	}
+}
+
 func TestTestModeMonitorReaderErrorsAreNonDestructive(t *testing.T) {
 	cases := []io.Reader{&errorReader{}, strings.NewReader("")}
 	for _, reader := range cases {
@@ -404,6 +454,30 @@ func TestBootAutoarmArmsOnlyForExactlyOneToken(t *testing.T) {
 	}
 	if len(calls) != 1 || strings.Join(calls[0], " ") != "enable --now usbkill.service" {
 		t.Fatalf("systemctl calls = %#v", calls)
+	}
+}
+
+func TestBootAutoarmUsesItsTotalDeadlineForActivation(t *testing.T) {
+	oldArmedPath, oldSystemctlRun := armedPath, systemctlRun
+	armedPath = filepath.Join(t.TempDir(), "armed")
+	defer func() {
+		armedPath = oldArmedPath
+		systemctlRun = oldSystemctlRun
+	}()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	systemctlRun = func(ctx context.Context, args ...string) error {
+		if ctx.Err() == nil {
+			t.Fatal("boot auto-arm systemctl call did not inherit the total deadline")
+		}
+		return ctx.Err()
+	}
+	finder := func(context.Context, Config) ([]USB, error) { return []USB{{}}, nil }
+	if err := bootAutoarmContext(ctx, testConfig(), finder); err == nil {
+		t.Fatal("expected expired boot auto-arm deadline")
+	}
+	if _, err := os.Stat(armedPath); !os.IsNotExist(err) {
+		t.Fatalf("armed marker exists or returned unexpected error: %v", err)
 	}
 }
 

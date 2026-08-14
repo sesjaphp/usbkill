@@ -26,7 +26,7 @@ The `/run` state is cleared at reboot. The persistent auto-arm setting does not 
 | `sudo usbkill disable-autoarm` | Disables future boot auto-arming and removes the opt-in marker. | Does not disarm the current session. |
 | `sudo usbkill status` | Shows token matching state, live service state, current arming-marker state, and boot auto-arm state. | None |
 
-The internal `daemon` and `boot-autoarm` commands are executed by systemd. Do not use them as routine operator commands. Direct `systemctl` control and status operations have a 45-second deadline. Each `udevadm info` lookup has a 5-second deadline, so device discovery and control commands return an error rather than waiting indefinitely if a helper becomes stuck.
+The internal `daemon` and `boot-autoarm` commands are executed by systemd. Do not use them as routine operator commands. Direct `systemctl` control and status operations have a 45-second deadline. Each `udevadm info` lookup has a 5-second deadline, so device discovery and control commands return an error rather than waiting indefinitely if a helper becomes stuck. Boot auto-arm uses one 25-second total budget shared by its discovery and activation steps, within the unit's 30-second start deadline.
 
 ## Normal setup and verification
 
@@ -70,6 +70,7 @@ sudo usbkill status
 | Opt-in marker present; no token match | Boot unit logs the condition and exits successfully. | Disarmed |
 | Opt-in marker present; multiple token matches | Boot unit logs the condition and exits successfully. | Disarmed |
 | Opt-in marker present; discovery error | Boot unit fails and records the error. | Disarmed |
+| Boot auto-arm's 25-second total budget expires | Boot unit records the discovery or activation failure. | Disarmed |
 | Auto-arm operation exceeds 30 seconds | Boot unit times out and records the failure. | Disarmed |
 
 To test boot auto-arm, save work, leave the token connected, reboot, and then inspect:
@@ -92,7 +93,7 @@ Disable future boot auto-arm with `sudo usbkill disable-autoarm`. To disable fut
 | `Service: ACTIVE` | Run `sudo usbkill status`. | The monitor is currently running. `Armed: yes` alone records marker state, not live process health. |
 | `Armed: no` after reboot | Run `sudo usbkill status`. | Normal unless boot auto-arm is enabled and the token was present. |
 | `usbkill.service` is inactive while disarmed | `sudo systemctl status usbkill.service`. | Expected; the unit is gated by the transient armed marker. |
-| Boot auto-arm did not arm | `sudo journalctl -u usbkill-autoarm.service -b --no-pager`. | Check token presence, ambiguity, discovery errors, or the explicit 30-second start timeout. |
+| Boot auto-arm did not arm | `sudo journalctl -u usbkill-autoarm.service -b --no-pager`. | Check token presence, ambiguity, discovery errors, the 25-second total boot budget, or the outer 30-second start timeout. |
 | A `usbkill` command reports a helper timeout | Check `journalctl -b`, `systemctl status systemd-udevd.service`, and the affected service state. | `systemctl` operations are bounded at 45 seconds; each identity lookup is bounded at 5 seconds. Investigate the host service rather than repeatedly waiting. |
 | Shutdown was requested but did not occur | `sudo journalctl -u usbkill.service -b --no-pager` and `sudo journalctl -u usbkill-failure.service -b --no-pager`. | The daemon logs up to three bounded poweroff attempts and records terminal failure. |
 

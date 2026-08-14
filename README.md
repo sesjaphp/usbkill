@@ -61,7 +61,7 @@ After you have passed the non-destructive test and deliberately want the watchdo
 sudo usbkill enable-autoarm
 ```
 
-At each boot, the one-shot auto-arm unit waits for udev settlement and arms only if exactly one configured token is present. The unit has a 30-second start deadline. If the token is absent, ambiguous, discovery fails, or the unit times out, it leaves the watchdog disarmed and records the reason; it does not power off the machine. Check the setting with `sudo usbkill status`. Disable future boot auto-arming without disarming the current session using:
+At each boot, the one-shot auto-arm unit waits for udev settlement and arms only if exactly one configured token is present. The boot command has one 25-second total budget for discovery and watchdog activation; the surrounding systemd unit has a 30-second start deadline. If the token is absent, ambiguous, discovery fails, or either deadline expires, it leaves the watchdog disarmed and records the reason; it does not power off the machine. Check the setting with `sudo usbkill status`. Disable future boot auto-arming without disarming the current session using:
 
 ```sh
 sudo usbkill disable-autoarm
@@ -94,7 +94,7 @@ USB token removed
 
 `pre_poweroff_delay` is only a delay. It is **not** RAM sanitization and must not be interpreted as a memory wipe. The default is zero. The configuration also bounds the shutdown command timeout to 30 seconds; setup uses a 10-second default. If the shutdown command fails, usbkill logs the failure and retries up to three times with a one-second gap. If all attempts fail, the daemon returns failure to systemd without an automatic service restart, and `usbkill-failure.service` writes an `authpriv.alert` journal record. The armed runtime directory is preserved across a service restart, while an explicit stop or reboot still clears the transient armed marker. An armed service fails closed at startup: if the configured token is absent or the device match is ambiguous, it enters the same bounded shutdown path instead of merely exiting.
 
-The daemon starts the udev monitor before its final startup token verification, so removals that occur during that verification remain queued for event matching. After readiness, systemd requires a watchdog heartbeat every 30 seconds and the daemon sends it every 10 seconds. If the armed watchdog stops sending heartbeats, systemd marks the unit failed and requests a normal poweroff through `FailureAction=poweroff`. This is intentionally fail-closed; test it on the target Arch machine only after saving work. The daemon treats the first matching removal as authoritative and runs one bounded shutdown sequence; that sequence may contain up to three controlled attempts. Reconnects do not cancel it. An exclusive runtime lock prevents test mode and the production daemon from monitoring concurrently; test mode also refuses to run while the production service is active. Reconnects do not cancel an already scheduled shutdown. Malformed, unrelated, add, change, wrong-VID, wrong-PID, wrong-serial, non-USB, and missing-serial events are ignored.
+The daemon starts the udev monitor before its final startup token verification, so removals that occur during that verification remain queued for event matching. Each udev event record is limited to 256 KiB; an oversized or otherwise unreadable monitor stream fails closed in production and remains non-destructive in test mode. After readiness, systemd requires a watchdog heartbeat every 30 seconds and the daemon sends it every 10 seconds. If the armed watchdog stops sending heartbeats, systemd marks the unit failed and requests a normal poweroff through `FailureAction=poweroff`. This is intentionally fail-closed; test it on the target Arch machine only after saving work. The daemon treats the first matching removal as authoritative and runs one bounded shutdown sequence; that sequence may contain up to three controlled attempts. Reconnects do not cancel it. An exclusive runtime lock prevents test mode and the production daemon from monitoring concurrently; test mode also refuses to run while the production service is active. Reconnects do not cancel an already scheduled shutdown. Malformed, unrelated, add, change, wrong-VID, wrong-PID, wrong-serial, non-USB, and missing-serial events are ignored.
 
 ## Configuration
 
@@ -108,7 +108,7 @@ pre_poweroff_delay: 0s
 shutdown_timeout: 10s
 ```
 
-The file is written atomically with mode `0600`; group- or world-writable configuration is rejected. IDs, serials, durations, unknown fields, and duplicate fields are validated. Serial values are normalized to uppercase and trimmed before comparison.
+The root-owned file is written atomically with mode `0600`, fsynced before its rename, and its parent directory is fsynced afterward. Symlinks, non-regular files, unexpected owners, and group- or world-writable configuration are rejected. IDs, serials, durations, unknown fields, and duplicate fields are validated. Serial values are normalized to uppercase and trimmed before comparison. The persistent auto-arm marker, transient armed marker, and monitor lock use the same regular-file and ownership checks.
 
 ## Security model and limitations
 
