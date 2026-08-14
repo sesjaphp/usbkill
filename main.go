@@ -23,6 +23,8 @@ const (
 	armedPath  = "/run/usbkill/armed"
 )
 
+var lockPath = "/run/usbkill/monitor.lock"
+
 type Config struct {
 	VendorID         string
 	ProductID        string
@@ -323,16 +325,42 @@ func arm() error {
 	if err := os.WriteFile(armedPath, []byte("armed\n"), 0600); err != nil {
 		return err
 	}
-	fmt.Println("Armed. Run sudo usbkill test to verify removal safely.")
+	if err := systemctl("enable", "--now", "usbkill.service"); err != nil {
+		_ = os.Remove(armedPath)
+		return fmt.Errorf("armed marker written but service could not start: %w", err)
+	}
+	fmt.Println("Armed and service enabled.")
 	return nil
 }
 
 func disarm() error {
+	if err := systemctl("disable", "--now", "usbkill.service"); err != nil {
+		return fmt.Errorf("could not stop and disable service: %w", err)
+	}
 	if err := os.Remove(armedPath); err != nil && !os.IsNotExist(err) {
 		return err
 	}
-	fmt.Println("Disarmed.")
+	fmt.Println("Disarmed and service disabled.")
 	return nil
+}
+
+func systemctl(args ...string) error {
+	return exec.Command("systemctl", args...).Run()
+}
+
+func acquireMonitorLock() (*os.File, error) {
+	if err := os.MkdirAll(filepath.Dir(lockPath), 0750); err != nil {
+		return nil, err
+	}
+	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		return nil, err
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		f.Close()
+		return nil, errors.New("another usbkill monitor is already running")
+	}
+	return f, nil
 }
 
 func status() error {
@@ -366,11 +394,18 @@ func daemon(test bool) error {
 	if err != nil {
 		return err
 	}
-	if !test {
-		if _, err = os.Stat(armedPath); err != nil {
-			return errors.New("not armed; run sudo usbkill arm")
+	if test {
+		if err := exec.Command("systemctl", "is-active", "--quiet", "usbkill.service").Run(); err == nil {
+			return errors.New("production service is active; run sudo usbkill disarm before test mode")
 		}
+	} else if _, err = os.Stat(armedPath); err != nil {
+		return errors.New("not armed; run sudo usbkill arm")
 	}
+	lock, err := acquireMonitorLock()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = syscall.Flock(int(lock.Fd()), syscall.LOCK_UN); _ = lock.Close() }()
 	m, err := find(c)
 	if err != nil {
 		return err

@@ -35,7 +35,7 @@ Run safe test mode before arming:
 sudo usbkill test
 ```
 
-After the removal test succeeds and the token is reconnected, arm the current boot session:
+After the removal test succeeds and the token is reconnected, arm the current boot session. `arm` writes the transient armed marker and enables/starts the production systemd service:
 
 ```sh
 sudo usbkill arm
@@ -43,12 +43,17 @@ sudo usbkill arm
 
 Remove the configured token. Test mode must report the matching removal and suppress the real poweroff. Reconnect the token afterward. Test mode never requires the armed marker. The armed marker lives in `/run`, so it is intentionally cleared on reboot; re-arm after every boot.
 
-Enable production monitoring only after test mode succeeds:
+Check production monitoring after arming:
 
 ```sh
-sudo systemctl enable --now usbkill.service
 sudo usbkill status
 journalctl -u usbkill.service -f
+```
+
+`disarm` stops and disables the production service before removing the armed marker:
+
+```sh
+sudo usbkill disarm
 ```
 
 Disable the trigger with:
@@ -72,7 +77,7 @@ USB token removed
 
 `pre_poweroff_delay` is only a delay. It is **not** RAM sanitization and must not be interpreted as a memory wipe. The default is zero. The configuration also bounds the shutdown command timeout.
 
-The daemon treats the first matching removal as authoritative and returns after one shutdown attempt. Reconnects do not cancel an already scheduled shutdown. Malformed, unrelated, add, change, wrong-VID, wrong-PID, wrong-serial, non-USB, and missing-serial events are ignored.
+The daemon treats the first matching removal as authoritative and returns after one shutdown attempt. An exclusive runtime lock prevents test mode and the production daemon from monitoring concurrently; test mode also refuses to run while the production service is active. Reconnects do not cancel an already scheduled shutdown. Malformed, unrelated, add, change, wrong-VID, wrong-PID, wrong-serial, non-USB, and missing-serial events are ignored.
 
 ## Configuration
 

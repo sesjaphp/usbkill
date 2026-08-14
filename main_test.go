@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -169,6 +170,22 @@ func TestMonitorReaderPropagatesReaderError(t *testing.T) {
 	reader := &errorReader{}
 	if err := monitorReader(context.Background(), testConfig(), slog.Default(), reader, &MockPoweroff{}); err == nil {
 		t.Fatal("expected reader error")
+	}
+}
+
+func TestMonitorLockIsExclusive(t *testing.T) {
+	oldPath := lockPath
+	lockPath = t.TempDir() + "/monitor.lock"
+	defer func() { lockPath = oldPath }()
+	first, err := acquireMonitorLock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = syscall.Flock(int(first.Fd()), syscall.LOCK_UN); _ = first.Close() }()
+	second, err := acquireMonitorLock()
+	if err == nil {
+		second.Close()
+		t.Fatal("expected second monitor lock to fail")
 	}
 }
 
