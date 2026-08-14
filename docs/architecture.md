@@ -1,0 +1,19 @@
+# Architecture overview
+
+`usbkill` is intentionally a single small Go program with no network listener, database, custom kernel component, or external Go dependency. Arch Linux provides `udevadm` for device identity and event monitoring and systemd provides the service and power-management boundary.
+
+## Runtime flow
+
+The CLI has separate setup, status, test, arm, disarm, and daemon paths. Setup enumerates physical USB storage devices, skips partitions, requires a stable serial number, and atomically writes a root-owned configuration. Test mode loads the configuration and uses an injected mock poweroff implementation. Arm verifies exactly one matching token, creates the transient armed marker, and enables the production service. Disarm stops and disables the service before removing the marker.
+
+The production daemon requires the armed marker, acquires an exclusive monitor lock, verifies exactly one matching token, and then monitors udev property events. A matching removal is authoritative. The daemon schedules the configured pre-poweroff delay and invokes a fixed-argument, bounded `systemctl --no-ask-password --ignore-inhibitors poweroff` command. Failed attempts are logged and retried within a fixed bound.
+
+## Safety boundaries
+
+The `Poweroff` interface is the test seam: tests use `MockPoweroff`, while production constructs `RealPoweroff`. The event matcher requires `ACTION=remove`, `ID_BUS=usb`, exact vendor and product IDs, and a non-empty canonical serial. The monitor lock prevents test and production daemons from running concurrently.
+
+Startup behavior is deliberately asymmetric. Test mode refuses an absent or ambiguous token without powering off. An armed production service treats an absent or ambiguous token as a fail-closed condition and enters the bounded shutdown path. Reconnects do not cancel a shutdown already in progress.
+
+## Contribution guidance
+
+Changes affecting identity matching, startup, poweroff, service hardening, configuration permissions, or package installation require focused regression tests and documentation updates. Automated tests must never invoke the real poweroff command. See [CONTRIBUTING.md](../CONTRIBUTING.md) and [SECURITY.md](../SECURITY.md).

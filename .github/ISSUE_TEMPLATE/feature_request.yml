@@ -1,0 +1,35 @@
+name: Feature request
+description: Propose an improvement to usbkill
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        usbkill intentionally remains a small Arch Linux daemon. Proposals should avoid networking, custom drivers, initramfs integration, unsafe memory-wiping claims, and unnecessary dependencies.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What user or security problem would this solve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Describe the smallest maintainable solution.
+    validations:
+      required: true
+  - type: textarea
+    id: security
+    attributes:
+      label: Security and recovery impact
+      description: Explain how this affects the threat model, failure behavior, and recovery.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered

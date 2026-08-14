@@ -1,0 +1,10 @@
+# Security-sensitive implementation and packaging files require maintainer review.
+* @sesjaphp
+/main.go @sesjaphp
+/main_test.go @sesjaphp
+/PKGBUILD @sesjaphp
+/.SRCINFO @sesjaphp
+/usbkill.service @sesjaphp
+/Makefile @sesjaphp
+/SECURITY.md @sesjaphp
+/docs/ @sesjaphp

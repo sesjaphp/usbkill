@@ -118,6 +118,10 @@ rm -f /mnt/etc/usbkill/config.yaml
 
 The exact root partition and encrypted-volume steps depend on the installation. Do not re-enable the service until the token and configuration have been verified in test mode.
 
+## Contributing
+
+Please read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request. The repository includes GitHub issue forms, a pull-request checklist, CI checks, ownership rules, an [architecture overview](docs/architecture.md), and a [security policy](SECURITY.md). Never publish device serial numbers or exploitable security details in public issues.
+
 ## Development and validation
 
 The project intentionally uses the Go standard library and Arch's systemd/udev tools. It has no networking, custom drivers, initramfs integration, cryptography, or memory-wiping tricks.
