@@ -2,9 +2,9 @@
 
 ## Scope
 
-Security reports include unexpected poweroff behavior, ways to bypass exact USB identity matching, unsafe test-mode behavior, shell or command injection, configuration permission bypasses, service-hardening regressions, and packaging or startup changes that weaken the documented threat model.
+Security reports include unexpected poweroff behavior, ways to bypass exact USB identity matching, unsafe test-mode behavior, unsafe boot auto-arming, shell or command injection, configuration permission bypasses, service-hardening regressions, and packaging or startup changes that weaken the documented threat model.
 
-`usbkill` is defense in depth for a running Arch Linux workstation. It does not guarantee RAM, CPU-cache, GPU-memory, firmware-memory, DMA, cold-boot, kernel, root-attacker, firmware, early-boot, or physical-tamper protection.
+`usbkill` is defense in depth for a running Arch Linux workstation. The production service is active only with its transient armed marker, and boot auto-arm is an explicit opt-in that arms only after finding exactly one configured token. An absent or ambiguous token at boot must leave the watchdog disarmed. The project does not guarantee RAM, CPU-cache, GPU-memory, firmware-memory, DMA, cold-boot, kernel, root-attacker, firmware, early-boot, or physical-tamper protection.
 
 ## Reporting a vulnerability
 
@@ -16,4 +16,4 @@ The maintainer will acknowledge a report when practical, investigate it, and coo
 
 ## Safe disclosure requirements
 
-Never submit a proof of concept that invokes `systemctl poweroff` on a developer machine. Use test mode, mocks, a disposable VM, or a fake command boundary. Security fixes should include a regression test and an update to the threat-model documentation.
+Never submit a proof of concept that invokes `systemctl poweroff` on a developer machine. Use test mode, mocks, a disposable VM, or a fake command boundary. Security fixes should include a regression test and an update to the threat-model documentation. Service-hardening changes, including `NoNewPrivileges`, require an actual Arch test of token detection and a real poweroff transaction before they are treated as supported.

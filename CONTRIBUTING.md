@@ -49,10 +49,10 @@ For package changes, also run `makepkg --printsrcinfo > .SRCINFO` and `makepkg -
 
 ## Change guidelines
 
-Keep the standard-library implementation small and auditable. Do not add networking, custom drivers, initramfs integration, cryptography, memory-wiping tricks, or shell command construction. Poweroff commands must use fixed arguments and bounded contexts. Changes to identity matching, startup behavior, shutdown, service hardening, or package installation require regression tests and documentation updates.
+Keep the standard-library implementation small and auditable. Do not add networking, custom drivers, initramfs integration, cryptography, memory-wiping tricks, or shell command construction. Poweroff commands must use fixed arguments and bounded contexts. Changes to identity matching, startup behavior, shutdown, boot auto-arm, service hardening, configuration permissions, or package installation require regression tests and documentation updates. Boot auto-arm changes must preserve the explicit opt-in setting and the rule that absent or ambiguous tokens leave the watchdog disarmed.
 
 Use focused commits with imperative subjects. Keep unrelated formatting or refactoring out of feature changes. Pull requests should explain the threat-model impact, test coverage, recovery implications, and any remaining limitations.
 
 ## Pull requests
 
-Open a pull request against `main` using the repository template. A maintainer will review security-sensitive changes carefully. Passing CI is required, but CI cannot replace a human review of changes affecting poweroff behavior.
+Open a pull request against `main` using the repository template. A maintainer will review security-sensitive changes carefully. Run the required local checks before opening a pull request; if public CI is enabled for the repository, it must pass as well. Automated checks cannot replace human review of changes affecting poweroff behavior.

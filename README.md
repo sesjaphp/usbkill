@@ -13,7 +13,7 @@ cd usbkill
 makepkg -si
 ```
 
-The `PKGBUILD` is local-source only. After cloning the repository, `makepkg` does not fetch another GitHub source or require a second GitHub login. It installs `/usr/bin/usbkill`, `usbkill.service`, `usbkill-failure.service`, and `usbkill-autoarm.service`, documentation, and an initially empty `/etc/usbkill` directory. The package declares `util-linux` because the failure notification uses its `logger` command. Installation does not configure, enable, or arm the watchdog.
+The `PKGBUILD` is local-source only. After cloning the repository, `makepkg` does not fetch another GitHub source or require a second GitHub login. It installs `/usr/bin/usbkill`, `usbkill.service`, `usbkill-failure.service`, and `usbkill-autoarm.service`, documentation, and an initially empty `/etc/usbkill` directory. The package declares `util-linux` because the failure notification uses its `logger` command. Installation does not configure, enable, or arm the watchdog. For command reference, safe boot-auto-arm testing, diagnostics, upgrades, and recovery, read the [operations guide](docs/operations.md).
 
 ## Configure and test
 
@@ -138,7 +138,7 @@ The exact root partition and encrypted-volume steps depend on the installation. 
 
 ## Contributing
 
-Please read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request. The repository includes GitHub issue forms, a pull-request checklist, CI checks, ownership rules, an [architecture overview](docs/architecture.md), and a [security policy](SECURITY.md). Never publish device serial numbers or exploitable security details in public issues.
+Please read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request. The repository includes GitHub issue forms, a pull-request checklist, ownership rules, an [architecture overview](docs/architecture.md), an [operations guide](docs/operations.md), and a [security policy](SECURITY.md). Never publish device serial numbers or exploitable security details in public issues.
 
 ## Development and validation
 
@@ -151,6 +151,7 @@ make test
 go test .
 go test -race .
 go build .
+systemd-analyze verify usbkill.service usbkill-failure.service usbkill-autoarm.service
 ```
 
 On Arch Linux, validate and build the package with:
